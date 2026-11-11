@@ -30,6 +30,14 @@
   #dock { position:fixed; left:0; right:0; bottom:20px; padding:0 12px; display:flex; flex-direction:column; align-items:center; gap:10px; pointer-events:none; }
   #hint { margin:0; max-width:540px; text-align:center; font-size:12.5px; color:rgba(255,255,255,.86); text-shadow:0 1px 8px rgba(0,0,0,.7); min-height:2.9em;
     display:flex; align-items:flex-end; justify-content:center; }
+  .seg[hidden] { display:none; }
+  #sub { pointer-events:auto; max-width:100%; }
+  #sub textarea { all:unset; box-sizing:border-box; width:min(480px, 74vw); height:3.4em; padding:8px 14px; font-size:12.5px; color:var(--ink); white-space:pre; overflow:auto; cursor:text; }
+  #sub textarea::placeholder { color:var(--dim); white-space:normal; }
+  #brand a { color:inherit; }
+  /* over the bright desk (Write, Draw) the loose text gets a dark plate behind it */
+  body.lit #hint { min-height:0; padding:7px 14px; border-radius:12px; background:rgba(13,15,21,.34); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); color:#fff; text-shadow:0 1px 3px rgba(0,0,0,.55); }
+  body.lit #brand { padding:7px 12px; margin:-7px -12px; border-radius:12px; background:rgba(13,15,21,.28); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); text-shadow:0 1px 3px rgba(0,0,0,.55); }
   #modes { pointer-events:auto; max-width:100%; overflow-x:auto; scrollbar-width:none; }
   #modes::-webkit-scrollbar { display:none; }
 
@@ -59,11 +67,12 @@
 <body>
 <div id="loading">Building the hand…</div>
 <div id="top" class="ui">
-  <div id="brand">Procedural arm<span>rigged, skinned and animated in code</span></div>
+  <div id="brand">Procedural arm: extras<span>new tricks for <a href="https://github.com/apekshik/procedural-arm-rig">apekshik’s rig</a>, where the original motions live</span></div>
   <div id="views" class="seg glass"></div>
 </div>
 <div id="dock" class="ui">
   <p id="hint"></p>
+  <div id="sub" class="seg glass" hidden></div>
   <div id="modes" class="seg glass"></div>
 </div>
 <div id="hud" class="ui glass">
@@ -364,7 +373,7 @@ const envReady = new Promise(resolve => {
   new RGBELoader().load('https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/equirectangular/royal_esplanade_1k.hdr', tex => {
     tex.mapping = THREE.EquirectangularReflectionMapping;
     scene.environment = tex; scene.background = tex; scene.backgroundBlurriness = 0.42; scene.backgroundIntensity = 0.36;
-    hemi.intensity = 0.12; keyL.intensity = 2.1; rim.intensity = 0.6; fill.intensity = 0.1;
+    hemi.intensity = 0.12; keyL.intensity = 2.1; rim.intensity = 0.6; fill.intensity = 0.1; Object.assign(LB, { hemi:0.12, key:2.1, rim:0.6, fill:0.1 });
     renderer.toneMappingExposure = 0.86; skinMat.envMapIntensity = 0.55; weightMat.envMapIntensity = 0.5; xrayMat.envMapIntensity = 0.4; xrayMat.opacity = 0.32;
     resolve(true);
   }, undefined, () => resolve(false));
@@ -529,6 +538,641 @@ const gripPose = g => {
   for (let f = 1; f < 5; f++) { blendCurl(f, OPEN, GRAB, g); P.spread[f] = lerp(SPLAY[f]*0.8, [0,0.08,0,0.06,0.10][f], g); }
   setThumb(THUMB.open, THUMB.grab, g);
 };
+/* ───────────────────────── pen and paper ─────────────────────────
+   The pen is a rigid child of the hand bone, and the fingers close onto it by contact, the same way they wrap the ball.
+   A planner moves a point over the page: along the strokes of a single-line font (Write) or after the pointer (Draw).
+   The arm is then solved so the pen tip sits exactly on that point, and the ink is laid down where the tip is. */
+const PAPER = { w:0.210, h:0.148, cx:0.105, cz:0.400, y:TY+0.0006, ppm:7000 };
+const PX0 = PAPER.cx + PAPER.w/2, PZ0 = PAPER.cz - PAPER.h/2;   // page origin is the writer's bottom-left corner: u runs toward -X, v toward +Z
+const LINE0 = PAPER.h - 0.022, LINEGAP = 0.0165, NLINES = 8, MARGIN_L = 0.014, MARGIN_R = 0.010;
+const inkCv = document.createElement('canvas'); inkCv.width = Math.round(PAPER.w*PAPER.ppm); inkCv.height = Math.round(PAPER.h*PAPER.ppm);
+const ink = inkCv.getContext('2d');
+const inkTex = new THREE.CanvasTexture(inkCv); inkTex.colorSpace = THREE.SRGBColorSpace; inkTex.anisotropy = 8;
+let sheetPlain = false;                                // whether the sheet on the desk is unruled
+function blankSheet(ruled = true) {
+  const w = inkCv.width, h = inkCv.height, k = PAPER.ppm;
+  ink.fillStyle = '#f4efe3'; ink.fillRect(0, 0, w, h);
+  inkTex.needsUpdate = true; sheetPlain = !ruled;
+  if (!ruled) return;                                  // a picture gets a plain sheet
+  ink.strokeStyle = 'rgba(92,126,180,0.42)'; ink.lineWidth = 2;
+  for (let i = 0; i < NLINES; i++) { const y = Math.round((PAPER.h - (LINE0 - i*LINEGAP))*k) + 0.5; ink.beginPath(); ink.moveTo(0, y); ink.lineTo(w, y); ink.stroke(); }
+  ink.strokeStyle = 'rgba(206,96,96,0.32)'; ink.beginPath(); ink.moveTo((MARGIN_L-0.004)*k, 0); ink.lineTo((MARGIN_L-0.004)*k, h); ink.stroke();
+  inkTex.needsUpdate = true;
+}
+blankSheet();
+const paper = new THREE.Mesh(new THREE.PlaneGeometry(PAPER.w, PAPER.h), new THREE.MeshStandardMaterial({ map:inkTex, color:0xe9e5dd, roughness:0.92, envMapIntensity:0.5, transparent:true, opacity:0 }));
+paper.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(new V3(-1,0,0), new V3(0,0,1), new V3(0,1,0)));
+paper.position.set(PAPER.cx, PAPER.y, PAPER.cz); paper.receiveShadow = true; paper.visible = false; scene.add(paper);
+
+const PEN_R = 0.0037, PEN_LEN = 0.142;
+const penObj = new THREE.Group();                      // origin at the tip, +Y up the barrel
+{
+  const barrel = new THREE.MeshPhysicalMaterial({ color:0x1d3f8f, roughness:0.28, clearcoat:0.8, clearcoatRoughness:0.2 });
+  const metal = new THREE.MeshStandardMaterial({ color:0xd4d8e0, roughness:0.22, metalness:1 });
+  const add = (geo, mat, y) => { const m = new THREE.Mesh(geo, mat); m.position.y = y; m.castShadow = true; penObj.add(m); };
+  add(new THREE.CylinderGeometry(PEN_R*0.93, 0.0005, 0.015, 20), metal, 0.0075);
+  add(new THREE.CylinderGeometry(PEN_R, PEN_R, PEN_LEN-0.021, 20), barrel, 0.015 + (PEN_LEN-0.021)/2);
+  add(new THREE.CylinderGeometry(PEN_R*1.04, PEN_R*1.04, 0.004, 20), metal, PEN_LEN-0.021);
+  add(new THREE.SphereGeometry(PEN_R, 16, 10), barrel, PEN_LEN-0.006);
+  penObj.userData.barrel = barrel;
+}
+penObj.visible = false; hand.add(penObj);
+// The grip, in the hand's own frame: where the tip is and a point the barrel passes through. The finger rows are where each
+// finger would go if nothing were in the way (thumb, index → pinky); contact with the pen and the table stops them short.
+const GRIP = { tip:new V3(0.1196,-0.0982,0.0111), via:new V3(0.0871,-0.0093,0.0435),
+  curl:[[0.31,0.37,0.59],[0.79,0.78,0.00],[0.74,0.76,0.58],[0.90,1.00,0.50],[0.90,1.00,0.50]], spread:[0.59,-0.10,0,0,0], roll:0.26,
+  head:new V3(0.50,-0.12,0.86), tilt:0.90, pole:new V3(-0.05,-1,-0.4) };   // which way the hand points on the desk, how far it rolls onto its little-finger edge, where the elbow goes
+// The hand comes at the line from below with the elbow tucked in, so a left hand does not sit on what it has just written.
+const penDir = new V3(), penA = new V3(), penB = new V3(), penT = new V3(), penPalm = new V3(), penHd = new V3();
+let penOn = false, penK = 0;                           // penK: 0 = the hand is still on its way, 1 = the tip is locked to the page
+function seatPen() {
+  penDir.subVectors(GRIP.via, GRIP.tip).normalize();
+  penObj.position.copy(GRIP.tip); penObj.quaternion.setFromUnitVectors(AY, penDir);
+  penA.copy(GRIP.tip).addScaledVector(penDir, 0.012); penB.copy(GRIP.tip).addScaledVector(penDir, PEN_LEN);
+  GRIP.head.normalize();
+  const down = tv.set(0,-1,0).addScaledVector(GRIP.head, GRIP.head.y).normalize(), thumbSide = tv2.crossVectors(GRIP.head, AY).normalize();
+  penPalm.copy(down).multiplyScalar(Math.cos(GRIP.tilt)).addScaledVector(thumbSide, Math.sin(GRIP.tilt));
+}
+seatPen();
+
+// A single-line handwriting font. Units: baseline 0, x-height 4, capitals 6.5, ascenders 7. Each glyph is [advance, strokes];
+// strokes are separated by "/", a stroke is a smooth curve through its points, and "!" marks a sharp corner.
+const U = 0.0064/4;                                    // one font unit in metres
+const FONT = {};
+{
+  const SRC = {
+    a:[4.6,'3.1,3.1 2.3,3.95 1.3,3.9 .45,2.9 .35,1.3 1.1,.15 2.1,.3 3.1,1.8 3.1,4! 3.1,.8 3.7,0'],
+    b:[4.2,'.6,7! .6,0! .6,2.4 1.4,3.75 2.5,3.9 3.35,2.9 3.35,1.2 2.5,.1 1.4,.15 .6,1.1'],
+    c:[3.8,'3.2,3.1 2.4,3.9 1.4,3.9 .5,2.9 .4,1.3 1.2,.15 2.3,.15 3.2,.9'],
+    d:[4.7,'3.2,3.0 2.3,3.9 1.3,3.9 .45,2.9 .35,1.3 1.1,.15 2.1,.3 3.2,1.8 3.2,7! 3.2,.8 3.8,0'],
+    e:[3.9,'.6,2.0 3.2,2.3! 3.1,3.2 2.3,3.95 1.3,3.85 .5,2.9 .4,1.4 1.1,.2 2.2,.1 3.3,.9'],
+    f:[3.2,'3.1,6.2 2.5,6.95 1.8,6.7 1.5,5.6 1.5,0 / .3,4 2.8,4'],
+    g:[4.4,'3.1,3.1 2.3,3.95 1.3,3.9 .45,2.9 .35,1.3 1.1,.15 2.1,.3 3.1,1.8 3.1,4! 3.1,-1.2 2.5,-2.4 1.5,-2.6 .6,-2'],
+    h:[4.2,'.6,7! .6,0! .6,2.4 1.5,3.8 2.5,3.9 3.2,3 3.2,0'],
+    i:[1.9,'.8,4 .8,0 / .8,5.6 .85,5.7'],
+    j:[2.4,'1.5,4! 1.5,-1.3 1,-2.4 .1,-2.5 -.5,-2 / 1.5,5.6 1.55,5.7'],
+    k:[3.9,'.6,7 .6,0 / 3,4 .6,1.6 / 1.5,2.5 3.3,0'],
+    l:[2.1,'.7,7 .7,1 1,.2 1.5,0'],
+    m:[5.8,'.6,4! .6,0! .6,2.6 1.3,3.8 2.2,3.8 2.7,2.9 2.7,0! 2.7,2.6 3.4,3.8 4.3,3.8 4.8,2.9 4.8,0'],
+    n:[4.2,'.6,4! .6,0! .6,2.5 1.5,3.8 2.5,3.9 3.2,3 3.2,0'],
+    o:[4.2,'2,4 1.1,3.7 .45,2.7 .4,1.3 1.1,.2 2,0 2.9,.3 3.5,1.3 3.5,2.7 2.9,3.7 2,4'],
+    p:[4.2,'.6,4! .6,-2.6! .6,2.4 1.4,3.75 2.5,3.9 3.35,2.9 3.35,1.2 2.5,.1 1.4,.15 .6,1.1'],
+    q:[4.3,'3.1,3.1 2.3,3.95 1.3,3.9 .45,2.9 .35,1.3 1.1,.15 2.1,.3 3.1,1.8 3.1,4! 3.1,-2.6'],
+    r:[3.2,'.6,4! .6,0! .6,2.4 1.3,3.6 2.2,3.95 2.9,3.5'],
+    s:[3.6,'3,3.2 2.3,3.9 1.3,3.9 .6,3.2 .9,2.3 2.4,1.7 3,.9 2.4,.15 1.3,.1 .4,.8'],
+    t:[3.3,'1.5,6.2 1.5,1.1 1.9,.25 2.7,.15 / .3,4 2.8,4'],
+    u:[4.2,'.6,4 .6,1.3 1.2,.2 2.2,.15 3.2,1.4 3.2,4! 3.2,0'],
+    v:[3.8,'.4,4! 1.9,0! 3.4,4'],
+    w:[5.2,'.4,4! 1.5,0! 2.6,3.4! 3.7,0! 4.8,4'],
+    x:[3.8,'.5,4 3.3,0 / 3.3,4 .5,0'],
+    y:[3.9,'.5,4 2,.2 / 3.5,4 1.2,-2 .2,-2.5'],
+    z:[3.8,'.5,4! 3.2,4! .5,0! 3.3,0'],
+    A:[5.2,'.3,0! 2.6,6.5! 4.9,0 / 1.2,2.2 4,2.2'],
+    B:[4.7,'.7,6.5 .7,0 / .7,6.5 2.6,6.4 3.6,5.4 3.3,4.1 1.6,3.5! 3.3,3.2 4,2 3.5,.6 2.3,0 .7,0'],
+    C:[4.8,'4.2,5.2 3.4,6.3 2.3,6.5 1.1,5.8 .5,4.2 .5,2.3 1.1,.7 2.3,0 3.4,.2 4.3,1.3'],
+    D:[5.0,'.7,6.5 .7,0 / .7,6.5 2.3,6.4 3.8,5.3 4.3,3.3 3.8,1.2 2.3,.1 .7,0'],
+    E:[4.4,'3.8,6.5! .7,6.5! .7,0! 3.9,0 / .7,3.4 3.2,3.4'],
+    F:[4.1,'3.8,6.5! .7,6.5! .7,0 / .7,3.4 3.1,3.4'],
+    G:[5.0,'4.2,5.2 3.4,6.3 2.3,6.5 1.1,5.8 .5,4.2 .5,2.3 1.1,.7 2.3,0 3.5,.3 4.3,1.4 4.3,2.8! 2.6,2.8'],
+    H:[4.8,'.7,6.5 .7,0 / 4.1,6.5 4.1,0 / .7,3.4 4.1,3.4'],
+    I:[2.9,'.4,6.5 2.4,6.5 / 1.4,6.5 1.4,0 / .4,0 2.4,0'],
+    J:[3.7,'3,6.5! 3,1.6 2.5,.4 1.6,0 .7,.4 .3,1.4'],
+    K:[4.5,'.7,6.5 .7,0 / 4,6.5 .7,2.6 / 1.9,3.8 4.2,0'],
+    L:[4.0,'.7,6.5! .7,0! 3.8,0'],
+    M:[6.0,'.6,0! .6,6.5! 3,2.2! 5.4,6.5! 5.4,0'],
+    N:[5.0,'.7,0! .7,6.5! 4.3,0! 4.3,6.5'],
+    O:[5.2,'2.6,6.5 1.3,6 .5,4.4 .5,2.1 1.3,.5 2.6,0 3.9,.5 4.7,2.1 4.7,4.4 3.9,6 2.6,6.5'],
+    P:[4.4,'.7,0! .7,6.5! 2.5,6.5 3.8,5.7 3.9,4.3 2.8,3.3 .7,3.2'],
+    Q:[5.2,'2.6,6.5 1.3,6 .5,4.4 .5,2.1 1.3,.5 2.6,0 3.9,.5 4.7,2.1 4.7,4.4 3.9,6 2.6,6.5 / 3.2,1.6 5,-.4'],
+    R:[4.7,'.7,0! .7,6.5! 2.5,6.5 3.8,5.7 3.9,4.3 2.8,3.3 .7,3.2 / 2.3,3.2 4.2,0'],
+    S:[4.6,'4,5.4 3.2,6.3 2.2,6.5 1.1,6.1 .6,5 1.1,3.9 2.3,3.3 3.6,2.7 4.1,1.6 3.6,.5 2.4,0 1.2,.2 .4,1.2'],
+    T:[4.6,'.2,6.5 4.4,6.5 / 2.3,6.5 2.3,0'],
+    U:[4.8,'.7,6.5 .7,2 1.2,.6 2.4,0 3.6,.6 4.1,2 4.1,6.5'],
+    V:[5.0,'.3,6.5! 2.5,0! 4.7,6.5'],
+    W:[6.4,'.3,6.5! 1.7,0! 3.2,5! 4.7,0! 6.1,6.5'],
+    X:[4.8,'.5,6.5 4.3,0 / 4.3,6.5 .5,0'],
+    Y:[4.8,'.3,6.5! 2.4,3.2! 4.5,6.5 / 2.4,3.2 2.4,0'],
+    Z:[4.8,'.5,6.5! 4.2,6.5! .5,0! 4.3,0'],
+    0:[4.4,'2.2,6.5 1.1,5.9 .5,4.3 .5,2.2 1.1,.6 2.2,0 3.3,.6 3.9,2.2 3.9,4.3 3.3,5.9 2.2,6.5'],
+    1:[3.6,'.8,5.2! 2.2,6.5! 2.2,0'],
+    2:[4.4,'.6,5.2 1.3,6.2 2.3,6.5 3.4,6 3.7,4.9 3.1,3.6 .5,0! 3.9,0'],
+    3:[4.4,'.6,5.5 1.4,6.3 2.4,6.5 3.4,5.9 3.5,4.6 2.7,3.6 1.8,3.4! 2.9,3.1 3.8,2.1 3.6,.8 2.5,0 1.3,.2 .4,1.1'],
+    4:[4.5,'3,0! 3,6.5! .4,2! 4.1,2'],
+    5:[4.4,'3.6,6.5! 1,6.5! .8,3.6! 1.9,4.1 3,3.9 3.8,2.8 3.7,1.3 2.8,.2 1.6,0 .5,.8'],
+    6:[4.4,'3.5,6.2 2.4,6.4 1.3,5.5 .6,3.6 .6,1.6 1.3,.3 2.4,0 3.4,.6 3.7,1.9 3.2,3.2 2.2,3.7 1.2,3.2 .6,2'],
+    7:[4.3,'.5,6.5! 3.9,6.5! 1.6,0'],
+    8:[4.4,'2.2,3.5 1.1,4.2 .9,5.4 1.5,6.3 2.2,6.5 2.9,6.3 3.5,5.4 3.3,4.2 2.2,3.5 1,2.6 .6,1.5 1.2,.4 2.2,0 3.2,.4 3.8,1.5 3.4,2.6 2.2,3.5'],
+    9:[4.4,'3.7,4.4 3.1,3.2 2.1,2.8 1.1,3.3 .6,4.5 .9,5.8 2,6.5 3.1,6.1 3.7,4.8 3.7,2.6 3.1,.9 2,0 .9,.3'],
+    '.':[2.2,'1,0 1.05,.1'], ',':[2.2,'1.1,.3 1.1,-.2 .6,-1.1'], '!':[2.2,'1,6.5 1,1.9 / 1,0 1.05,.1'],
+    '?':[4.0,'.5,5.2 1.1,6.2 2.1,6.5 3.1,6 3.4,5 2.8,3.9 2,3.1 2,1.9 / 2,0 2.05,.1'],
+    "'":[1.8,'1,6.8 .9,5.3'], '"':[2.7,'.8,6.8 .7,5.3 / 1.9,6.8 1.8,5.3'], '-':[3.4,'.6,2.3 2.8,2.3'], '_':[4.0,'0,-.6 4,-.6'],
+    ':':[2.2,'1,3.3 1.05,3.4 / 1,0 1.05,.1'], ';':[2.2,'1.1,3.3 1.15,3.4 / 1.1,.3 1.1,-.2 .6,-1.1'],
+    '(':[2.6,'2,7.2 1,5.4 .7,3 1,.4 2,-1.4'], ')':[2.6,'.6,7.2 1.6,5.4 1.9,3 1.6,.4 .6,-1.4'], '/':[3.3,'.3,-.6 3,7'],
+    '&':[4.8,'4.3,0 1.3,4.8 1.2,5.9 1.9,6.5 2.7,6 2.7,4.9 .9,2.7 .5,1.4 1.2,.3 2.3,0 3.4,.8 4.2,2.7'],
+    '+':[4.0,'2,.8 2,4.2 / .3,2.5 3.7,2.5'], '=':[4.0,'.5,3.3 3.5,3.3 / .5,1.7 3.5,1.7'],
+    '#':[4.2,'1.6,5.4 1,.4 / 3.2,5.4 2.6,.4 / .4,3.8 3.9,3.8 / .2,1.9 3.7,1.9'],
+    '@':[5.6,'3.5,2.9 2.8,3.4 2,3 1.7,2.2 2.1,1.5 2.9,1.6 3.5,2.9! 3.6,1.8 4.2,1.5 4.8,2.4 4.6,3.9 3.5,4.9 2,4.9 .8,3.8 .5,2.2 1.1,.7 2.5,0 3.9,.3'],
+  };
+  for (const ch in SRC) FONT[ch] = { w:SRC[ch][0], strokes:SRC[ch][1].split('/').map(src => strokePath(src, 0.22)) };
+}
+// One stroke, "x,y x,y! x,y ...", as closely spaced points: a smooth curve through the points, with sharp corners at the "!" ones.
+function strokePath(src, step) {
+  const pts = src.trim().split(/\s+/).map(t => { const c = t.endsWith('!'), [x, y] = (c ? t.slice(0,-1) : t).split(',').map(Number); return { x, y, c }; });
+  const out = []; let run = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    run.push(pts[i]); if (!pts[i].c && i < pts.length-1) continue;
+    const n = run.length, closed = n > 3 && run[0].x === run[n-1].x && run[0].y === run[n-1].y;   // each run between corners is a Catmull-Rom curve
+    for (let j = 0; j < n-1; j++) {
+      const p1 = run[j], p2 = run[j+1], p0 = run[j-1] || (closed ? run[n-2] : p1), p3 = run[j+2] || (closed ? run[1] : p2);
+      const steps = Math.max(1, Math.ceil(Math.hypot(p2.x-p1.x, p2.y-p1.y)/step));
+      for (let k = out.length ? 1 : 0; k <= steps; k++) {
+        const t = k/steps, t2 = t*t, t3 = t2*t, cr = (a, b, c, d) => 0.5*(2*b + (c-a)*t + (2*a-5*b+4*c-d)*t2 + (3*b-a-3*c+d)*t3);
+        out.push([cr(p0.x,p1.x,p2.x,p3.x), cr(p0.y,p1.y,p2.y,p3.y)]);
+      }
+    }
+    run = [pts[i]];
+  }
+  return out;
+}
+// A stroke ready to be drawn: its points on the page, the distance along it, and how fast the pen may go at each point.
+function makeJob(pts) {
+  const n = pts.length, f = new Array(n).fill(1), len = [0];
+  for (let i = 1; i < n; i++) len.push(len[i-1] + Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]));
+  for (let i = 1; i < n-1; i++) {
+    const ax = pts[i][0]-pts[i-1][0], ay = pts[i][1]-pts[i-1][1], bx = pts[i+1][0]-pts[i][0], by = pts[i+1][1]-pts[i][1];
+    f[i] = 1/(1 + 1.2*Math.abs(Math.atan2(ax*by-ay*bx, ax*bx+ay*by))/Math.max(1e-6, (len[i+1]-len[i-1])/2/U));   // tight curves are slower, corners nearly stop
+  }
+  f[0] = f[n-1] = 0.3;                                 // the pen lands and lifts gently, and slows down ahead of a corner
+  for (let i = 1; i < n; i++) f[i] = Math.min(f[i], f[i-1]+0.22);
+  for (let i = n-2; i >= 0; i--) f[i] = Math.min(f[i], f[i+1]+0.22);
+  return { pts, f, len, L:len[n-1] };
+}
+const PEN = { u:0.10, v:0.07, h:0.05, du:0, dv:0, dh:0, cu:0.10, cv:0.07, ch:0.05, su:0.10, sv:0.07,   // pen point, its velocity, the carrot it chases, a slow copy
+              state:'idle', jobs:[], queue:[], i:0, s:0, k:0, m:null, line:0, caret:MARGIN_L, wordStart:true,
+              sheetT:0, held:0, greeted:false, script:false, lastInk:null, rec:[], pic:[], words:[], also:[], spiros:0,   // rec: the stroke being drawn by pointer; pic: every stroke of the picture on the sheet, as text; words: what is written on it, and where
+               ptr:{ u:0.10, v:0.07, down:false } };
+const paperVis = sp(0, 12), penVis = sp(0, 10);
+const lineV = i => LINE0 - i*LINEGAP;
+function freshSheet(keepQueue) {
+  const p = PEN; p.sheetT = 0.45; p.line = 0; p.caret = MARGIN_L; p.wordStart = true; p.pic.length = 0; p.words.length = 0; p.also.length = 0; p.spiros = 0;
+  if (mode === 'draw' && !document.querySelector('#sub textarea')) drawBar();
+  if (!keepQueue) { p.queue.length = 0; p.jobs.length = 0; p.state = 'idle'; showQueue(); }
+}
+function newLine() { const p = PEN; p.line++; p.caret = MARGIN_L + 0.0015*Math.random(); p.wordStart = true; if (p.line >= NLINES) freshSheet(true); }
+function nextChar() { const ch = PEN.queue.shift(); showQueue(); placeChar(ch); }
+function placeChar(ch) {
+  const p = PEN;
+  if (ch === '\n') return newLine();
+  if (ch === ' ') { if (p.caret > MARGIN_L + 0.002) { p.caret += 3*U; const r = p.words[p.words.length-1]; if (r && r.line === p.line && Math.abs(r.end - (p.caret - 3*U)) < 0.001) { r.text += ' '; r.end = p.caret; } } p.wordStart = true; return; }
+  const g = FONT[ch]; if (!g) return;
+  const room = PAPER.w - MARGIN_R;
+  if (p.wordStart) {                                   // wrap whole words, as far as the rest of the word has been typed
+    let wd = g.w; for (const c of p.queue) { if (c === ' ' || c === '\n') break; wd += FONT[c] ? FONT[c].w : 0; }
+    if (p.caret + wd*U > room && p.caret > MARGIN_L + 0.002 && wd*U < room - MARGIN_L) newLine();
+  }
+  if (p.caret + g.w*U > room) newLine();
+  p.wordStart = false;
+  // no two letters come out the same: size, slant and height on the line all wander a little
+  const sc = 1 + 0.05*(Math.random()*2-1), sl = 0.15 + 0.04*(Math.random()*2-1), by = lineV(p.line) + 0.22*U*(Math.random()*2-1), x0 = p.caret;
+  for (const s of g.strokes) p.jobs.push(makeJob(s.map(([x, y]) => [x0 + (x + y*sl)*sc*U, by + y*sc*U])));
+  // remember the writing as words with a place on the page, so a Claude asked to add to the sheet knows what it says
+  const run = p.words[p.words.length-1];
+  if (run && run.line === p.line && Math.abs(run.end - x0) < 0.001) run.text += ch; else p.words.push({ line:p.line, u:x0, v:lineV(p.line), text:ch, end:0 });
+  p.caret += (g.w*sc + 0.2*(Math.random()*2-1))*U;
+  p.words[p.words.length-1].end = p.caret;
+}
+function type(text) { for (const ch of text) if (ch === '\n' || ch === ' ' || FONT[ch]) PEN.queue.push(ch); showQueue(); }
+function showQueue() {
+  if (mode !== 'write') return;
+  const q = PEN.queue.join('').replace(/\n/g, '⏎');
+  document.getElementById('hint').textContent = q ? 'Writing: ' + (q.length > 60 ? q.slice(0, 60) + '…' : q) : MODES.write.hint;
+}
+/* A picture as text: one stroke per line, "x,y x,y! ..." in millimetres on the 210 x 148 page, origin bottom-left.
+   This is what the "Ask your Claude" prompt asks for. Anything in the pasted text that is not such a line is ignored. */
+function parseStrokes(text) {
+  const num = '-?(?:\\d+(?:\\.\\d+)?|\\.\\d+)', tok = new RegExp(`^(${num}),(${num})(!?)$`), out = [];
+  for (let line of text.split('\n')) {
+    const parts = line.trim().replace(/^[-*•]\s+/, '').replace(/\s*,\s*/g, ',').split(/\s+/).map(t => tok.exec(t));
+    if (!parts.length || parts.some(m => !m)) continue;
+    const pts = parts.map(m => `${clamp(+m[1], 3, 207)},${clamp(+m[2], 3, 145)}${m[3]}`);
+    if (pts.length === 1) pts.push(`${clamp(+parts[0][1], 3, 207) + 0.2},${clamp(+parts[0][2], 3, 145)}`);   // a lone point is a dot
+    out.push(pts.join(' ')); if (out.length >= 500) break;
+  }
+  return out;
+}
+function playStrokes(list, sign, keep) {                // keep: add to what is on the sheet instead of taking a clean one
+  if (!list.length) return 0;
+  const p = PEN; noteClose(); if (!keep) freshSheet(); p.script = true; p.pic.push(...list);
+  for (const src of list) p.jobs.push(makeJob(strokePath(src, 0.5).map(([x, y]) => [x/1000, y/1000])));
+  if (sign) { p.line = NLINES-1; p.caret = 0.152; for (const ch of sign) placeChar(ch); }
+  if (mode === 'draw') { drawBar(); document.getElementById('hint').textContent = `Drawing ${list.length} strokes.`; }
+  return list.length;
+}
+// A stroke drawn by pointer is remembered as text too, so a Claude asked to add to the picture can be told what is there.
+function keepStroke() {
+  const p = PEN, text = strokeText(p.rec);
+  p.rec = [];
+  if (p.pic.length < 400) { p.pic.push(text); if (p.pic.length === 1 && mode === 'draw' && !document.querySelector('#sub textarea')) drawBar(); }
+}
+function strokeText(r) {                                 // a run of points [u, v, u, v, ...] in metres, as a line of stroke text
+  const n = r.length/2, keep = new Uint8Array(n), todo = [[0, n-1]];
+  keep[0] = keep[n-1] = 1;
+  while (todo.length) {                                // keep only the points that matter: those more than 0.4 mm off the line between their neighbours
+    const [a, b] = todo.pop(), ax = r[2*a], ay = r[2*a+1], dx = r[2*b]-ax, dy = r[2*b+1]-ay, len = Math.hypot(dx, dy) || 1e-9;
+    let far = 0, at = -1;
+    for (let i = a+1; i < b; i++) { const d = len < 1e-6 ? Math.hypot(r[2*i]-ax, r[2*i+1]-ay) : Math.abs((r[2*i]-ax)*dy - (r[2*i+1]-ay)*dx)/len; if (d > far) { far = d; at = i; } }
+    if (far > 0.0004) { keep[at] = 1; todo.push([a, at], [at, b]); }
+  }
+  const pts = []; for (let i = 0; i < n; i++) if (keep[i]) pts.push(`${(r[2*i]*1000).toFixed(1)},${(r[2*i+1]*1000).toFixed(1)}`);
+  return pts.join(' ');
+}
+/* ───────────────────────── spirograph ─────────────────────────
+   A toothed ring lies on the page and a toothed wheel rolls round the inside of it with the pen through one of its holes.
+   The curve is worked out from the tooth counts, as on the real toy: a wheel of n teeth in a ring of N comes back to its
+   start after n/gcd(N, n) trips round, and leaves N/gcd(N, n) points. The plastic is shown following the pen. */
+const SPIRO = { tooth:0.058/105, inks:[['#18245c', 0x1d3f8f], ['#b3263c', 0xc22f45], ['#1c7a4c', 0x1f8a55], ['#74309a', 0x7d38a8], ['#c2611a', 0xd06a1c]], cur:null, ring:null, wheel:null };
+const spiroCol = new THREE.Color(), spiroVis = sp(0, 9), gcd = (a, b) => b ? gcd(b, a % b) : a;
+function spirograph() {
+  const p = PEN, T = SPIRO.tooth;
+  let N, n, d, tries = 0;
+  do {                                                   // a ring and a wheel that close up in a sensible number of turns, and a hole not too near the middle
+    N = Math.random() < 0.5 ? 96 : 105; n = [24, 30, 32, 36, 40, 42, 45, 48, 50, 52, 56, 60, 63, 64, 70, 72, 75, 80, 84][Math.floor(Math.random()*19)];
+    d = n*T*(0.35 + 0.55*Math.random());
+  } while (++tries < 200 && (n/gcd(N, n) > 13 || N/gcd(N, n) < 3 || (N - n)*T + d < 0.030 || (SPIRO.cur && SPIRO.cur.n === n && SPIRO.cur.N === N)));
+  const R = N*T, r = n*T, turns = n/gcd(N, n), petals = N/gcd(N, n), k = (R - r)/r, end = 2*PI*turns, cx = PAPER.w/2, cy = PAPER.h/2;
+  const count = Math.min(14000, Math.ceil(end*((R - r) + d*k)/0.0005)), pts = [];
+  for (let i = 0; i <= count; i++) { const t = end*i/count; pts.push([cx + (R - r)*Math.cos(t) + d*Math.cos(k*t), cy + (R - r)*Math.sin(t) - d*Math.sin(k*t)]); }
+  if (!p.spiros && (p.pic.length || p.words.length || !sheetPlain)) freshSheet(); else { p.jobs.length = 0; p.state = 'idle'; }   // patterns pile up on a plain sheet of their own
+  const j = makeJob(pts), [ink_, pen_] = SPIRO.inks[p.spiros % SPIRO.inks.length];
+  j.spiro = { N, n, R, r, d, k, end, cx, cy }; j.color = ink_; j.pen = pen_; j.speed = 1.6;
+  p.jobs.push(j); p.script = true; p.spiros++;
+  p.also.push(`a spirograph pattern centred at ${(cx*1000).toFixed(0)},${(cy*1000).toFixed(0)}, reaching ${((R - r + d)*1000).toFixed(0)} mm from its centre, with ${petals} points`);
+  if (mode === 'draw') { noteClose(); drawBar(); document.getElementById('hint').textContent = `Spirograph: a wheel of ${n} teeth in a ring of ${N}. ${petals} points, ${turns} ${turns === 1 ? 'turn' : 'turns'}.`; }
+}
+function spiroBuild(S) {                                 // the plastic for this pattern: a ring toothed on the inside, and a wheel with holes
+  for (const m of [SPIRO.ring, SPIRO.wheel]) if (m) { scene.remove(m); m.geometry.dispose(); }
+  const toothed = (rad, teeth, path) => { for (let i = 0; i <= teeth*4; i++) { const a = i/(teeth*4)*2*PI, q = rad + (i % 4 < 2 ? 0.00045 : -0.00045); if (i) path.lineTo(q*Math.cos(a), q*Math.sin(a)); else path.moveTo(q*Math.cos(a), q*Math.sin(a)); } return path; };
+  const ringShape = new THREE.Shape().absarc(0, 0, S.R + 0.011, 0, 2*PI, false); ringShape.holes.push(toothed(S.R, S.N, new THREE.Path()));
+  const wheelShape = toothed(S.r, S.n, new THREE.Shape()), hole = (x, y, q) => wheelShape.holes.push(new THREE.Path().absarc(x, y, q, 0, 2*PI, true));
+  hole(S.d, 0, 0.0013);                                  // the hole the pen is in lies along the wheel's own x axis
+  for (let i = 1; i < 14; i++) { const q = S.r*(0.14 + 0.058*i), a = i*0.83; if (q < S.r - 0.004 && Math.hypot(q*Math.cos(a) - S.d, q*Math.sin(a)) > 0.004) hole(q*Math.cos(a), q*Math.sin(a), 0.0011); }
+  const mk = (shape, color, opacity, y) => { const m = new THREE.Mesh(new THREE.ShapeGeometry(shape, 72), new THREE.MeshStandardMaterial({ color, roughness:0.3, envMapIntensity:0.25, transparent:true, opacity, depthWrite:false, side:THREE.DoubleSide }));
+    m.userData.opacity = opacity; m.quaternion.copy(paper.quaternion); m.position.set(PX0 - S.cx, PAPER.y + y, PZ0 + S.cy); scene.add(m); return m; };
+  SPIRO.ring = mk(ringShape, 0x2f7fc4, 0.50, 0.0006); SPIRO.wheel = mk(wheelShape, 0x1f6fbe, 0.58, 0.0010); SPIRO.cur = S;
+}
+function spiroShow(dt) {
+  const p = PEN, j = p.jobs[0], S = j && j.spiro && isPen(mode) && paperVis.x > 0.9 && p.sheetT <= 0 ? j.spiro : null;
+  spiroVis.t = S ? 1 : 0;
+  penObj.userData.barrel.color.lerp(spiroCol.set(j && j.pen && isPen(mode) ? j.pen : 0x1d3f8f), 1 - Math.exp(-dt*6));   // the pen changes with the ink
+  if (S && SPIRO.cur !== S) spiroBuild(S);
+  const v = clamp(spiroVis.x, 0, 1);
+  for (const m of [SPIRO.ring, SPIRO.wheel]) if (m) { m.visible = v > 0.01; m.material.opacity = m.userData.opacity*v; }
+  if (!S || !SPIRO.wheel) return;
+  // where along the curve the pen is, and so where the wheel has rolled to; the wheel then shifts by the little the pen trails its target, to keep the hole on the tip
+  const last = j.pts.length - 1, seg = j.len[p.i+1] - j.len[p.i], f = p.state === 'draw' ? (p.i + (seg > 0 ? clamp((p.s - j.len[p.i])/seg, 0, 1) : 0))/last : 0, t = S.end*f;
+  const gu = S.cx + (S.R - S.r)*Math.cos(t) + (p.state === 'draw' ? p.u - p.cu : 0), gv = S.cy + (S.R - S.r)*Math.sin(t) + (p.state === 'draw' ? p.v - p.cv : 0);
+  SPIRO.wheel.position.set(PX0 - gu, PAPER.y + 0.0010, PZ0 + gv);
+  SPIRO.wheel.quaternion.copy(paper.quaternion).multiply(q2.setFromAxisAngle(AZ, -S.k*t));
+}
+function stopScript() { PEN.jobs.length = 0; PEN.state = 'idle'; }
+function scriptDone() { NOTE.writing = false; if (mode === 'draw') { drawBar(); document.getElementById('hint').textContent = NOTE.on ? noteHint() : MODES.draw.hint; } }
+const CAT = [
+  '68,106 65,127! 79,115 92,115 106,127! 104,106 109,95 103,81 86,75 70,81 63,95 68,106', '73,97 77,101 81,97', '91,97 95,101 99,97',
+  '84,91 88,91! 86,88.2! 84,91', '86,88.2 86,85.5', '80,85 83,82.5 86,85.5! 89,82.5 92,85',
+  '72,89 55,93', '72,87 54,86', '72,85 56,79', '100,89 117,93', '100,87 118,86', '100,85 116,79',
+  '73,79 63,64 59,44 65,28 86,23 107,28 112,44 108,64 99,78', '80,54 79,31 82,25', '92,54 93,31 90,25', '61,36 48,30 37,37 37,49 45,52',
+  Array.from({ length:13 }, (_, i) => { const a = 0.6 + (i % 12)/12*2*Math.PI; return `${(160 + 15*Math.cos(a)).toFixed(2)},${(45 + 15*Math.sin(a)).toFixed(2)}`; }).join(' '),
+  '148,51 158,56 171,51', '146,43 160,48 174,41', '150,34 160,39 171,34', '148,36 139,28 129,32 119,25 107,28 97,25',
+];
+const ASK = `I have a 3D hand that draws with a pen on a sheet of paper, and I would like you to give it a picture to draw. Draw whatever you like.
+
+Reply with ONLY a code block of strokes, one stroke per line, in this format:
+
+x,y x,y x,y ...
+
+- The page is 210 wide and 148 tall, in millimetres. x runs left to right and y runs bottom to top, so y=148 is the top edge. Keep everything between 12 and 198 in x, and between 12 and 136 in y.
+- Each line is one pen stroke. The pen goes down at the first point, passes smoothly through every point in order, and lifts after the last. A curve is fitted through the points, so 3 to 6 points are enough for an arc.
+- Put ! straight after a point to make a sharp corner there: 20,20 60,100! 100,20 is a pointed peak. A stroke with only two points is a straight line.
+- To close a shape, end the stroke on its first point.
+- It is a line drawing: no fills and no colour. Shade with hatching if you want to.
+- Strokes are drawn in the order given. Keep details at least 2 mm across so the pen can make them.
+- Be creative.
+
+Example (a house with a door, and a sun):
+
+40,30! 40,80! 110,80! 110,30! 40,30
+35,80! 75,115! 115,80
+65,30! 65,55! 82,55! 82,30
+160,117 167,114 170,107 167,100 160,97 153,100 150,107 153,114 160,117`;
+const SCRIPT_SPEED = 1.25;                             // scripted pictures are drawn this much faster than handwriting
+const ASK_RULES = ASK.slice(ASK.indexOf('Reply with ONLY'), ASK.indexOf('\n\nExample')), ASK_EXAMPLE = ASK.slice(ASK.indexOf('Example'));
+
+/* ───────────────────────── the request note ─────────────────────────
+   Asking a Claude for a picture puts a small note beside the page with the request written on it. The note stands for a
+   longer text: copying it copies the request together with the rules for the stroke format. Clicking the note selects it;
+   typing while it is selected has the hand write a new request over the old one. */
+const NOTE = { w:0.095, h:0.075, cx:-0.062, cz:0.445, last:0, S:0.62, on:false, more:false, focus:false, sel:false, writing:false, hover:false, flash:0, chars:[], jobs:[], col:0, ln:0, ends:[] };
+NOTE.u0 = PX0 - (NOTE.cx + NOTE.w/2); NOTE.v0 = NOTE.cz - NOTE.h/2 - PZ0;      // the note's bottom-left corner in page coordinates
+const NOTE_L = 0.006, NOTE_TOP = 0.0165, NOTE_GAP = 0.0098, NOTE_LINES = 5, NOTE_ASK = ['Draw whatever you like.', 'Add whatever it needs.'];
+const noteCv = document.createElement('canvas'); noteCv.width = Math.round(NOTE.w*PAPER.ppm); noteCv.height = Math.round(NOTE.h*PAPER.ppm);
+const nctx = noteCv.getContext('2d'), noteTex = new THREE.CanvasTexture(noteCv); noteTex.colorSpace = THREE.SRGBColorSpace; noteTex.anisotropy = 8;
+const notePaper = new THREE.Mesh(new THREE.PlaneGeometry(NOTE.w, NOTE.h), new THREE.MeshStandardMaterial({ map:noteTex, color:0xe9e5dd, roughness:0.92, envMapIntensity:0.5, transparent:true, opacity:0 }));
+notePaper.quaternion.copy(paper.quaternion); notePaper.position.set(NOTE.cx, PAPER.y, NOTE.cz); notePaper.receiveShadow = true; notePaper.visible = false; scene.add(notePaper);
+const noteVis = sp(0, 12);
+const noteRoom = ln => NOTE.w - 0.006 - (ln === 0 ? 0.013 : 0);                // the first line stops short of the icon in the corner
+// text as strokes, in metres from a starting point, with no wrapping: for the small print and the icon
+function textStrokes(text, x0, y0, scale) {
+  const out = []; let x = x0;
+  for (const ch of text) { const g = FONT[ch]; if (g) for (const st of g.strokes) out.push(st.map(([a, b]) => [x + (a + b*0.15)*scale*U, y0 + b*scale*U])); x += (g ? g.w : 3)*scale*U; }
+  return out;
+}
+const NOTE_SMALL = textStrokes('+ how to draw it', NOTE_L, 0.0052, 0.40);
+const NOTE_ICON = (() => {                              // the copy button, drawn by hand: a dashed box around a C
+  const cx = NOTE.w - 0.0082, cy = NOTE.h - 0.0082, r = 0.0043, out = [], wob = i => 0.00022*Math.sin(i*12.9898)*Math.cos(i*4.1);
+  const c = [[-r, -r], [r, -r], [r, r], [-r, r]];
+  for (let sd = 0; sd < 4; sd++) for (let d = 0; d < 3; d++) {
+    const a = c[sd], b = c[(sd+1) % 4], t0 = d/3 + 0.05, t1 = (d+1)/3 - 0.08, i = sd*3 + d;
+    out.push([[cx + lerp(a[0], b[0], t0) + wob(i), cy + lerp(a[1], b[1], t0) + wob(i+7)], [cx + lerp(a[0], b[0], t1) + wob(i+3), cy + lerp(a[1], b[1], t1) + wob(i+11)]]);
+  }
+  return out.concat(textStrokes('C', cx - 0.0019, cy - 0.0024, 0.46));
+})();
+function noteRender() {
+  const N = NOTE, k = PAPER.ppm, c = nctx, line = (pts, ox, oy) => { c.beginPath(); pts.forEach(([x, y], i) => i ? c.lineTo((x-ox)*k, (N.h-(y-oy))*k) : c.moveTo((x-ox)*k, (N.h-(y-oy))*k)); c.stroke(); };
+  c.fillStyle = '#f3e4a2'; c.fillRect(0, 0, noteCv.width, noteCv.height);
+  if (N.sel) {                                           // the selection: a band behind every line, small print included
+    c.fillStyle = 'rgba(70,130,255,0.36)';
+    for (let i = 0; i < NOTE_LINES; i++) if (N.ends[i] > NOTE_L) c.fillRect((NOTE_L-0.0015)*k, (NOTE_TOP + i*NOTE_GAP - 0.0062)*k, (N.ends[i]-NOTE_L+0.003)*k, 0.0086*k);
+    c.fillRect((NOTE_L-0.0015)*k, (N.h-0.0052-0.0038)*k, 0.0415*k, 0.0056*k);
+  }
+  c.lineCap = c.lineJoin = 'round';
+  const lit = N.hover || N.flash > 0;                     // the copy button darkens under the pointer and fills for a moment when used
+  if (lit) { c.fillStyle = N.flash > 0 ? 'rgba(24,36,92,0.30)' : 'rgba(24,36,92,0.10)'; c.beginPath(); c.roundRect((N.w-0.0133)*k, 0.0031*k, 0.0102*k, 0.0102*k, 0.0016*k); c.fill(); }
+  c.strokeStyle = lit || N.sel ? '#18245c' : '#7c7f93'; c.lineWidth = k*(lit ? 0.00052 : 0.00042); for (const st of NOTE_ICON) line(st, 0, 0);
+  c.strokeStyle = '#7c7f93'; c.lineWidth = k*0.00036; for (const st of NOTE_SMALL) line(st, 0, 0);
+  c.strokeStyle = '#18245c'; c.lineWidth = k*0.00055; for (const j of N.jobs) if (j.done) line(j.pts, N.u0, N.v0);
+  noteTex.needsUpdate = true;
+}
+// Lay one more character on the note. Returns what was added, or null when the note is full. rest is what is known to follow, for wrapping whole words.
+function notePlace(ch, rest = '') {
+  const N = NOTE, u = U*N.S, e = { ch, jobs:[], col:N.col, ln:N.ln, end:N.ends[N.ln] };
+  if (ch === ' ') {
+    if (N.col > NOTE_L + 0.001) N.col += 3*u;
+    let wd = 0; for (const c of rest) { if (c === ' ') break; wd += FONT[c] ? FONT[c].w : 0; }
+    if (N.col + Math.max(wd, 9)*u > noteRoom(N.ln) && N.ln < NOTE_LINES-1) { N.ln++; N.col = NOTE_L; }
+    return e;
+  }
+  const g = FONT[ch]; if (!g) return null;
+  if (N.col + g.w*u > noteRoom(N.ln)) { if (N.ln >= NOTE_LINES-1) return null; N.ln++; N.col = NOTE_L; }
+  const sc = 1 + 0.05*(Math.random()*2-1), sl = 0.15 + 0.04*(Math.random()*2-1), x0 = N.u0 + N.col, y0 = N.v0 + N.h - NOTE_TOP - N.ln*NOTE_GAP + 0.2*u*(Math.random()*2-1);
+  for (const st of g.strokes) { const j = makeJob(st.map(([x, y]) => [x0 + (x + y*sl)*sc*u, y0 + y*sc*u])); j.note = true; e.jobs.push(j); }
+  N.col += g.w*sc*u; N.ends[N.ln] = N.col;
+  return e;
+}
+function noteDrop(done) {                                // take the note's unwritten strokes away from the hand; done: count them as written
+  const P_ = PEN; if (P_.jobs.length && P_.jobs[0].note && P_.state !== 'idle') P_.state = 'idle';
+  P_.jobs = P_.jobs.filter(j => !j.note); if (done) for (const j of NOTE.jobs) j.done = true;
+}
+function noteClear() { const N = NOTE; noteDrop(); N.chars = []; N.jobs = []; N.col = NOTE_L; N.ln = 0; N.ends = []; N.sel = false; noteRender(); }
+const noteHint = () => NOTE.sel ? 'Click the C on the note to copy it for your Claude, or type and the hand rewrites it first. Then paste the reply into the box.'
+                                : 'Click the C on the note to copy it for your Claude, or click the note to rewrite it. Then paste the reply into the box.';
+function noteOpen(more) {
+  const N = NOTE, text = NOTE_ASK[more ? 1 : 0]; N.on = true; N.more = !!more; noteClear();
+  for (let i = 0; i < text.length; i++) { const e = notePlace(text[i], text.slice(i+1)); if (e) { N.chars.push(e); N.jobs.push(...e.jobs); } }
+  noteSelect();
+}
+function noteSelect() { const N = NOTE; noteDrop(true); N.sel = N.focus = true; noteRender(); drawBar(); document.getElementById('hint').textContent = noteHint(); }
+function noteDeselect() { const N = NOTE, was = N.sel; N.sel = N.focus = false; if (was) { noteRender(); document.getElementById('hint').textContent = noteHint(); } }
+function noteClose() { NOTE.on = NOTE.focus = NOTE.sel = false; noteDrop(); }
+function noteAdd(ch) {                                   // one more character for the hand to write; false when the note is full
+  const N = NOTE, e = notePlace(ch); if (!e) return false;
+  N.chars.push(e); N.jobs.push(...e.jobs);
+  if (e.jobs.length) { PEN.jobs.push(...e.jobs); PEN.script = N.writing = true; }
+  return true;
+}
+function noteUndo() {                                    // take the last character back; true if any of it was already on the paper
+  const N = NOTE, e = N.chars.pop(); if (!e) return false;
+  const inked = e.jobs.some(j => j.done || (PEN.jobs[0] === j && PEN.state !== 'idle'));
+  if (PEN.jobs[0] && e.jobs.includes(PEN.jobs[0]) && PEN.state !== 'idle') PEN.state = 'idle';
+  PEN.jobs = PEN.jobs.filter(j => !e.jobs.includes(j)); N.jobs = N.jobs.filter(j => !e.jobs.includes(j));
+  N.col = e.col; N.ln = e.ln; N.ends[e.ln] = e.end; if (N.ln < NOTE_LINES-1) N.ends[N.ln+1] = undefined;
+  return inked;
+}
+function noteType(ch) {
+  const N = NOTE, g = FONT[ch]; if (ch !== ' ' && !g) return;
+  if (N.sel) noteClear();                                // typing over the selection replaces it
+  N.last = time;
+  if (g && N.col + g.w*U*N.S > noteRoom(N.ln) && N.ln < NOTE_LINES-1) {
+    // The word has run out of line. Rather than break it, rub out what there is of it and start it again on the next line.
+    let n = 0; while (n < N.chars.length && N.chars[N.chars.length-1-n].ch !== ' ') n++;
+    if (n > 0 && n <= 12 && n < N.chars.length) {
+      const word = N.chars.slice(-n).map(e => e.ch); let inked = false;
+      for (let i = 0; i < n; i++) inked = noteUndo() || inked;
+      N.ln++; N.col = NOTE_L; for (const c of word) noteAdd(c);
+      if (inked) noteRender();
+    }
+  }
+  if (!noteAdd(ch)) document.getElementById('hint').textContent = 'The note is full.';
+}
+function noteBackspace() { if (NOTE.sel) return noteClear(); NOTE.last = time; if (noteUndo()) noteRender(); }   // what was already on the paper is rubbed out
+// what copying the note copies: the request on it, plus everything a Claude needs to answer in strokes
+function notePrompt() {
+  const req = NOTE.chars.map(e => e.ch).join('').trim() || NOTE_ASK[NOTE.more ? 1 : 0];
+  return NOTE.more
+    ? `I have a 3D hand that draws with a pen on a sheet of paper. There is already a picture on the page, and I would like you to add to it, fitted around what is there. My request, as written on a note beside the page: "${req}"\n\n${ASK_RULES}\n- Give only the new strokes. Do not repeat the ones already on the page.\n\n${PEN.pic.length ? `On the page so far, in the same format:\n\n${PEN.pic.join('\n')}` : 'There are no drawn strokes on the page yet.'}${PEN.also.length ? `\n\nAlso on the page: ${PEN.also.join('; ')}.` : ''}${PEN.words.length ? `\n\nThere is also handwriting on the page. Each line below is the text and the x,y where it starts, on its baseline. Small letters are about 6 mm tall, capitals and tall letters about 10 mm, and a letter is about 7 mm wide:\n\n${PEN.words.map(r => `"${r.text.trim()}" at ${(r.u*1000).toFixed(0)},${(r.v*1000).toFixed(0)}`).join('\n')}` : ''}`
+    : `I have a 3D hand that draws with a pen on a sheet of paper, and I would like you to give it a picture to draw. My request, as written on a note beside the page: "${req}"\n\n${ASK_RULES}\n\n${ASK_EXAMPLE}`;
+}
+const VPEN = 0.085;                                    // top speed of the pen on the paper, m/s
+function stepPen(dt) {
+  const p = PEN, ready = penK >= 1 && p.held > 0.55 && paperVis.x > 0.9 && p.sheetT <= 0, k = PAPER.ppm;
+  p.held = penVis.x > 0.9 ? p.held + dt : 0;
+  if (NOTE.on && !p.script && p.ptr.u > PAPER.w && time - NOTE.last > 1.2) { p.ptr.u = 0.13; p.ptr.v = 0.045; }   // done writing on the note: move off it so it can be read
+  const n = Math.max(1, Math.ceil(dt/0.003)), h = dt/n;
+  let dirty = false;
+  for (let it = 0; it < n; it++) {
+    let inkOn = false, w = 75, inkCol = '#18245c';
+    if (mode === 'draw' && !p.script) {                // the carrot goes after the pointer; pressing lowers the pen
+      w = 42;
+      const du = p.ptr.u - p.cu, dv = p.ptr.v - p.cv, dl = Math.hypot(du, dv), mx = 0.9*h;
+      if (dl > mx) { p.cu += du/dl*mx; p.cv += dv/dl*mx; } else { p.cu = p.ptr.u; p.cv = p.ptr.v; }
+      const down = p.ptr.down && ready;
+      p.ch += clamp((down ? 0 : 0.005) - p.ch, -0.3*h, 0.3*h);
+      inkOn = down && p.h < 0.0012;
+    } else if (!ready) {
+      p.ch += clamp((p.held > 0.55 ? 0.012 : 0.05) - p.ch, -0.1*h, 0.1*h);   // stay well clear of the desk until the fingers have closed on the pen
+    } else {
+      if (p.state === 'idle') {
+        while (mode === 'write' && !p.jobs.length && p.queue.length) nextChar();
+        if (p.sheetT > 0) continue;
+        if (p.jobs.length) {                            // hop through the air to the start of the next stroke
+          const a = p.jobs[0].pts[0], d = Math.hypot(a[0]-p.cu, a[1]-p.cv);
+          p.m = { u0:p.cu, v0:p.cv, h0:p.ch, u1:a[0], v1:a[1], hop:clamp(0.0028 + d*0.2, 0.003, 0.014), dur:clamp(Math.max(d, p.ch*2)/0.25, 0.085, 0.7)/(p.script ? SCRIPT_SPEED : 1) };
+          p.k = 0; p.state = 'move';
+        } else if (p.script) {                          // a scripted picture is finished: hand the pen back to the pointer
+          p.script = false; p.ptr.u = p.cu; p.ptr.v = p.cv; scriptDone(); continue;
+        } else {                                        // nothing to write: hover just past the last letter
+          const tu = p.caret + 0.004, tv_ = lineV(p.line) + 0.002, du = tu - p.cu, dv = tv_ - p.cv, dl = Math.hypot(du, dv), mx = 0.15*h;
+          if (dl > mx) { p.cu += du/dl*mx; p.cv += dv/dl*mx; } else { p.cu = tu; p.cv = tv_; }
+          p.ch += clamp(0.008 - p.ch, -0.05*h, 0.05*h);
+        }
+      }
+      if (p.state === 'move') {
+        const m = p.m; p.k = Math.min(1, p.k + h/m.dur); const e = smooth(0, 1, p.k);
+        p.cu = lerp(m.u0, m.u1, e); p.cv = lerp(m.v0, m.v1, e); p.ch = lerp(m.h0, 0, e) + m.hop*4*p.k*(1-p.k);
+        if (p.k >= 1 && Math.hypot(p.u-m.u1, p.v-m.v1) < 0.00025 && p.h < 0.00015) { p.state = 'draw'; p.s = 0; p.i = 0; }
+      } else if (p.state === 'draw') {
+        const j = p.jobs[0], last = j.pts.length-1;
+        while (p.i < last-1 && j.len[p.i+1] < p.s) p.i++;
+        const i = p.i, seg = j.len[i+1]-j.len[i], t = seg > 0 ? clamp((p.s-j.len[i])/seg, 0, 1) : 1;
+        p.cu = lerp(j.pts[i][0], j.pts[i+1][0], t); p.cv = lerp(j.pts[i][1], j.pts[i+1][1], t); p.ch = 0;
+        p.s += VPEN*(j.speed || (p.script ? SCRIPT_SPEED : 1))*lerp(j.f[i], j.f[i+1], t)*h;
+        inkOn = true; inkCol = j.color || '#18245c';
+        if (p.s >= j.L && Math.hypot(p.u-j.pts[last][0], p.v-j.pts[last][1]) < 0.0003) { p.jobs.shift().done = true; p.state = 'idle'; }
+      }
+    }
+    // the pen point follows the carrot through a critically damped spring, which rounds the motion the way a hand does
+    p.du += (-2*w*p.du - w*w*(p.u-p.cu))*h; p.dv += (-2*w*p.dv - w*w*(p.v-p.cv))*h; p.dh += (-2*w*p.dh - w*w*(p.h-p.ch))*h;
+    p.u += p.du*h; p.v += p.dv*h; p.h += p.dh*h;
+    if (p.h < 0) { p.h = 0; if (p.dh < 0) p.dh = 0; }
+    if (inkOn) {
+      if (p.lastInk) {
+        const onNote = NOTE.on && p.u > PAPER.w + 0.012, c = onNote ? nctx : ink, ou = onNote ? NOTE.u0 : 0, ov = onNote ? NOTE.v0 : 0, hh = onNote ? NOTE.h : PAPER.h;   // the ink lands on whichever sheet the pen is over
+        c.strokeStyle = inkCol; c.lineCap = 'round'; c.lineWidth = k*(0.00090 - 0.00028*clamp(Math.hypot(p.du, p.dv)/0.1, 0, 1))*(onNote ? 0.66 : 1);   // a slower pen leaves more ink
+        c.beginPath(); c.moveTo((p.lastInk[0]-ou)*k, (hh-(p.lastInk[1]-ov))*k); c.lineTo((p.u-ou)*k, (hh-(p.v-ov))*k); c.stroke(); if (onNote) noteTex.needsUpdate = true; else dirty = true;
+      }
+      p.lastInk = [p.u, p.v];
+      if (mode === 'draw' && !p.script) p.rec.push(p.u, p.v);
+    } else { p.lastInk = null; if (p.rec.length) keepStroke(); }
+  }
+  if (dirty) inkTex.needsUpdate = true;
+  const a = 1 - Math.exp(-dt*6); p.su += (p.u-p.su)*a; p.sv += (p.v-p.sv)*a;
+}
+function penHand(dt) {
+  stepPen(dt);
+  const p = PEN, G = GRIP;
+  penT.set(PX0 - p.u, PAPER.y + p.h, PZ0 + p.v);
+  // The arm carries the hand along the line; the quick part of each stroke (and the lift between strokes) is done by the wrist,
+  // by turning the hand toward where the tip needs to be. Whatever the wrist leaves over, the arm makes up exactly.
+  tv.set(p.su - p.u, p.h, p.v - p.sv); tv.addScaledVector(G.head, -tv.dot(G.head));
+  penHd.copy(G.head).addScaledVector(tv, 0.6*penK/0.13).normalize().applyQuaternion(q1.copy(Qt).invert());
+  P.wdev = clamp(Math.atan2(-penHd.z, penHd.x), -0.4, 0.4); P.wflex = clamp(Math.asin(clamp(penHd.y, -1, 1)), -0.7, 0.7);
+  P.palm.copy(penPalm); P.pole.copy(G.pole);
+  P.tgt.copy(penT).sub(tv.copy(G.tip).applyQuaternion(Qh)); P.tgtW = 8;
+  const g = smooth(0.3, 0.9, penVis.x);                 // the fingers close as the pen arrives in the hand
+  for (let f = 1; f < 5; f++) { for (let j = 0; j < 3; j++) P.curl[f][j] = lerp(RELAX[f][j], G.curl[f][j], g); P.spread[f] = G.spread[f]*g; }
+  setThumb(THUMB.open, [...G.curl[0], G.spread[0], G.roll], g);
+  P.tense = 0.3;
+  const err = tv.copy(G.tip).applyQuaternion(Qh).add(W).distanceTo(penT);
+  penK = clamp(penK + (err < 0.03 && penVis.x > 0.8 ? dt*2.2 : -dt*4), 0, 1);
+}
+// turn the hand, at the wrist, to point along a direction in the world
+function pointHand(v, dev = 0.4, flex = 0.7) {
+  v.applyQuaternion(q1.copy(Qt).invert());
+  P.wdev = clamp(Math.atan2(-v.z, v.x), -dev, dev); P.wflex = clamp(Math.asin(clamp(v.y, -1, 1)), -flex, flex);
+}
+const PEN_CAM = [new V3(0.105,0.134,0.281), new V3(0.105,-0.31,0.40)], PUP_CAM = [new V3(1.90,0.12,1.00), new V3(-0.62,0.02,0.50)];
+
+/* ───────────────────────── shadow puppets ─────────────────────────
+   A lamp off to the arm's side throws the hand's shadow on a wall on the other side, so what counts is the hand's outline
+   seen along the lamp's beam. The room lights go down while the lamp is on. */
+const LB = { hemi:hemi.intensity, key:keyL.intensity, rim:rim.intensity, fill:fill.intensity };   // the room's normal light levels
+const WALL = { x:-0.62, y0:-0.44, y1:0.60, z0:0.06, z1:1.06 };
+const wall = new THREE.Mesh(new THREE.PlaneGeometry(WALL.z1 - WALL.z0, WALL.y1 - WALL.y0), new THREE.MeshLambertMaterial({ color:0xf3e8d4, transparent:true, opacity:0 }));
+wall.rotation.y = PI/2; wall.position.set(WALL.x, (WALL.y0 + WALL.y1)/2, (WALL.z0 + WALL.z1)/2); wall.receiveShadow = true; wall.visible = false; scene.add(wall);
+const lamp = new THREE.SpotLight(0xfff0d8, 0, 0, 0.30, 0.4, 0);
+lamp.position.set(1.5,-0.05,0.25); lamp.target.position.set(WALL.x,-0.02,0.54); lamp.castShadow = true; lamp.shadow.mapSize.set(2048, 2048);
+lamp.shadow.camera.near = 0.5; lamp.shadow.camera.far = 3; lamp.shadow.bias = -0.0003; lamp.visible = false; scene.add(lamp, lamp.target);
+const pupVis = sp(0, 5);
+const PUP = { names:['Dog', 'Swan', 'Rabbit'], which:0, t:0, auto:true };
+function pupPick(i) { PUP.which = i; PUP.t = 0; PUP.auto = false; pupBar(); }
+function pupBar() { subBar(PUP.names.map((nm, i) => [nm, () => pupPick(i), i === PUP.which])); }
+
+/* ───────────────────────── paper football ─────────────────────────
+   A folded paper triangle stands on the desk. The index finger is cocked behind the thumb and let go; when the fingertip
+   reaches the triangle it is launched, tumbles through the air, and either clears the goal or does not. */
+const SPOT = new V3(0.14, TY, 0.40), GOAL = { x:0.14, z:0.63, half:0.075, bar:TY+0.055, top:TY+0.21 };
+const FB = { pos:new V3(SPOT.x, TY+0.0107, SPOT.z), vel:new V3(), q:new Quat(), w:new V3(), state:'set', t:0, aim:0, aimTo:0, power:0, want:0.6,
+             auto:true, idle:0, open:0, made:0, tries:0, judged:false, scored:false };
+const goalVis = sp(0, 10), ballVis = sp(0, 14), fbDir = new V3(0,0,1), fbSide = new V3(-1,0,0);
+const ball = (() => {
+  const sh = new THREE.Shape(); sh.moveTo(-0.032, 0); sh.lineTo(0.032, 0); sh.lineTo(0, 0.032); sh.closePath();
+  const g = new THREE.ExtrudeGeometry(sh, { depth:0.006, bevelEnabled:false }); g.translate(0, -0.0107, -0.003);   // origin at the centre of the triangle
+  const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color:0xe9e5dd, roughness:0.9, envMapIntensity:0.5 }));
+  m.castShadow = true; m.visible = false; scene.add(m); return m;
+})();
+const goal = new THREE.Group();
+{
+  const mat = new THREE.MeshStandardMaterial({ color:0xf0b429, roughness:0.4 });
+  const rod = (len, x, y, rz) => { const m = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.004, len, 12), mat); m.position.set(x, y, 0); m.rotation.z = rz; m.castShadow = true; goal.add(m); };
+  rod(GOAL.bar - TY, 0, (GOAL.bar - TY)/2, 0); rod(GOAL.half*2 + 0.008, 0, GOAL.bar - TY, PI/2);
+  for (const sd of [-1, 1]) rod(GOAL.top - GOAL.bar, sd*GOAL.half, (GOAL.top + GOAL.bar)/2 - TY, 0);
+  const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.032, 0.005, 24), mat); foot.position.y = 0.0025; foot.castShadow = true; goal.add(foot);
+}
+goal.position.set(GOAL.x, TY, GOAL.z); goal.visible = false; scene.add(goal);
+const aimLine = new THREE.Mesh(new THREE.PlaneGeometry(0.003, 0.15), new THREE.MeshBasicMaterial({ color:0xffffff, transparent:true, opacity:0.35, depthWrite:false }));
+aimLine.geometry.rotateX(-PI/2); aimLine.geometry.translate(0, 0, 0.125); aimLine.visible = false; scene.add(aimLine);
+function fbReset() {
+  const F = FB; F.pos.set(SPOT.x, TY+0.0107, SPOT.z); F.vel.set(0,0,0); F.w.set(0,0,0); F.state = 'set'; F.t = 0; F.idle = 0; F.power = 0; F.judged = F.scored = false;
+  ballVis.x = 0; ballVis.v = 0;
+}
+function fbAimAt(pt) { if (pt.z > SPOT.z + 0.04 && (FB.state === 'set' || FB.state === 'charge')) FB.aim = clamp(Math.atan2(pt.x - SPOT.x, pt.z - SPOT.z), -0.4, 0.4); }
+function fbRelease() { if (FB.state === 'charge') { FB.state = 'flick'; FB.t = 0; FB.open = 0.75; } }
+function fbStep(dt) {
+  const F = FB; F.t += dt; F.open -= dt;
+  fbDir.set(Math.sin(F.aim), 0, Math.cos(F.aim)); fbSide.crossVectors(fbDir, AY);
+  if (F.state === 'set' || F.state === 'charge') F.q.setFromAxisAngle(AY, F.aim);
+  if (F.state === 'set') {
+    // left alone, the hand takes its own shots, and not every one is a good one
+    if (F.auto && ballVis.x > 0.95 && (F.idle += dt) > 1.3) { F.state = 'charge'; F.t = 0; F.want = 0.2 + 0.7*Math.random(); F.aimTo = (Math.random() - 0.5)*0.76; }
+  } else if (F.state === 'charge') {
+    F.power = Math.min(1, F.t/0.9);
+    if (F.auto) { F.aim += (F.aimTo - F.aim)*Math.min(1, dt*7); if (F.power >= F.want) fbRelease(); }
+    else document.getElementById('hint').textContent = 'Power ' + '▮'.repeat(Math.round(F.power*10)).padEnd(10, '▯');
+  } else if (F.state === 'flick') {
+    // launch as the fingertip arrives
+    tv.copy(HS[1].p[3]).applyQuaternion(Qh).add(W).sub(F.pos);
+    if (tv.dot(fbDir) > -0.02 || F.t > 0.3) {
+      const v = lerp(1.25, 2.7, F.power), el = 0.85;
+      F.vel.copy(fbDir).multiplyScalar(v*Math.cos(el)); F.vel.y = v*Math.sin(el);
+      F.w.copy(fbSide).multiplyScalar(14 + 10*F.power); F.w.y = (Math.random() - 0.5)*6;   // end over end, with a little wobble
+      F.state = 'fly'; F.t = 0; F.tries++;
+    }
+  } else if (F.state === 'fly') {
+    const n = Math.max(1, Math.ceil(dt/0.004)), h = dt/n;
+    for (let i = 0; i < n && F.state === 'fly'; i++) {
+      const pz = F.pos.z;
+      F.vel.y -= 9.81*h; F.pos.addScaledVector(F.vel, h);
+      const wl = F.w.length(); if (wl > 1e-4) F.q.premultiply(q2.setFromAxisAngle(tv.copy(F.w).divideScalar(wl), wl*h));
+      if (!F.judged && pz < GOAL.z && F.pos.z >= GOAL.z) {            // crossing the plane of the goal
+        const dx = F.pos.x - GOAL.x, ax = Math.abs(dx), y = F.pos.y;
+        const post = Math.abs(ax - GOAL.half) < 0.016 && y > GOAL.bar - 0.01 && y < GOAL.top, bar = ax < GOAL.half && Math.abs(y - GOAL.bar) < 0.014, stem = ax < 0.012 && y < GOAL.bar;
+        if (post || bar || stem) { F.pos.z = GOAL.z - 0.002; F.vel.z *= -0.35; F.vel.x += Math.sign(dx || 1)*0.25; F.w.multiplyScalar(-0.5); }   // off the woodwork
+        else { F.judged = true; F.scored = ax < GOAL.half && y > GOAL.bar; }
+      }
+      const onDesk = F.pos.x > -0.20 && F.pos.x < 0.54 && F.pos.z > 0.25 && F.pos.z < 0.69 && F.pos.y > TY - 0.02, ground = (onDesk ? TY : FLOOR) + 0.011;
+      if (F.pos.y < ground && F.vel.y < 0) {
+        F.pos.y = ground;
+        if (F.vel.y > -0.5 || F.t > 4) {                               // comes to rest lying flat
+          F.pos.y = ground - 0.008; F.q.setFromEuler(eul.set(-PI/2, 0, Math.random()*6.28, 'YXZ')); F.state = 'done'; F.t = 0;
+          if (F.scored) F.made++;
+          if (mode === 'flick') document.getElementById('hint').textContent = (F.scored ? 'It’s good! ' : 'No good. ') + F.made + ' of ' + F.tries + '.';
+        } else { F.vel.y *= -0.32; F.vel.x *= 0.6; F.vel.z *= 0.6; F.w.multiplyScalar(0.55); }
+      }
+    }
+  } else if (F.t > 1.3) fbReset();
+}
+
+/* ───────────────────────── rock paper scissors ───────────────────────── */
+const RPS = { names:['Rock', 'Paper', 'Scissors'], phase:'wait', t:0, you:0, me:0, score:[0, 0] };
+function rpsPlay(c) {
+  if (mode !== 'rps' || RPS.phase === 'pump') return;
+  RPS.you = c; RPS.me = Math.floor(Math.random()*3); RPS.phase = 'pump'; RPS.t = 0;   // the hand's pick is made here, at random, whatever you chose
+  document.getElementById('hint').textContent = 'Rock… paper… scissors…';
+}
+function rpsResult() {
+  const R = RPS, d = (R.you - R.me + 3) % 3;
+  if (d === 1) R.score[0]++; else if (d === 2) R.score[1]++;
+  document.getElementById('hint').textContent = `You: ${R.names[R.you]}. Hand: ${R.names[R.me]}. ${['A draw.', 'You win!', 'The hand wins.'][d]} You ${R.score[0]}, hand ${R.score[1]}.`;
+}
 const MODES = {
   reach: { label:'Reach & grab', hint:'The hand chases the ball and closes around it. Drag the ball yourself.',
     fn(t, dt) {
@@ -633,7 +1277,77 @@ const MODES = {
       setThumb(THUMB.relax, THUMB.relax, 0);
       P.wflex = -0.1; P.wdev = 0.05; P.tense = 0;
     } },
+  write: { label:'Write', cam:PEN_CAM, hint:'Type, and the hand writes it. Enter starts a new line, Backspace takes back what is not written yet, Esc takes a fresh sheet.',
+    fn(t, dt) { penHand(dt); } },
+  draw: { label:'Draw', cam:PEN_CAM, hint:'Press and drag to draw. Or have a Claude script a picture for the hand. Esc takes a fresh sheet.',
+    fn(t, dt) { penHand(dt); } },
+  flick: { label:'Paper football', hint:'Point at the desk to aim, hold to wind up the finger, let go to flick. Left alone, the hand takes its own shots.',
+    fn(t, dt) {
+      fbStep(dt);
+      const F = FB, cock = F.state === 'charge' ? F.power : 0, open = F.open > 0;
+      // the wrist sits behind the triangle with the index finger lined up on it
+      P.tgt.copy(SPOT).addScaledVector(fbDir, -0.142).addScaledVector(fbSide, -0.030); P.tgt.y = TY + 0.088 - 0.008*cock; P.tgtW = 9;
+      pointHand(tv.copy(fbDir).setY(-0.18).normalize());
+      P.palm.set(0,-1,0).addScaledVector(fbSide, 0.2); P.pole.set(0.8,-0.7,-0.3);
+      for (let j = 0; j < 3; j++) {
+        P.curl[1][j] = open ? [-0.25, 0.02, 0][j] : lerp([0.85, 1.40, 0.75][j], [1.00, 1.60, 1.00][j], cock);   // cocked behind the thumb, then let fly
+        for (let f = 2; f < 5; f++) P.curl[f][j] = [1.2, 1.6, 1.0][j];
+      }
+      for (let f = 1; f < 5; f++) P.spread[f] = 0;
+      setThumb(THUMB.beak, THUMB.open, open ? 1 : 0);
+      P.tense = 0.2 + 0.6*cock;
+    } },
+  puppet: { label:'Shadow puppets', cam:PUP_CAM, hint:'A lamp, a wall and one hand. Pick an animal, or let them take turns.',
+    fn(t, dt) {
+      const U_ = PUP; U_.t += dt;
+      if (U_.auto && U_.t > 7) { U_.which = (U_.which + 1) % 3; U_.t = 0; pupBar(); }
+      const w = U_.which, s = U_.t;
+      P.tgtW = 5; P.wdev = 0; P.tense = 0.2;
+      for (let f = 1; f < 5; f++) P.spread[f] = 0;
+      if (w === 0) {
+        // Dog: the hand on edge, fingers forward for the muzzle, thumb up for an ear. The little finger drops to open the jaw.
+        const bark = Math.max(0, Math.sin(s*7))*smooth(0.2, 0.5, Math.sin(s*1.3));
+        P.tgt.set(0.30,-0.10,0.42); P.pole.set(0.3,-1,-0.4); P.palm.set(-1,-0.3,0);
+        pointHand(tv.set(0,0.05,1).normalize(), 0.5, 1.1);
+        for (let f = 1; f < 5; f++) blendCurl(f, OPEN, OPEN, 0);
+        P.spread[1] = -0.15; P.spread[3] = -0.17; P.spread[4] = -0.22 + 0.50*bark;   // fingers pressed together; the little one is the jaw
+        setThumb([-0.55, 0, 0, 0, 0], [-0.55, 0, 0, 0, 0], 0);
+      } else if (w === 1) {
+        // Swan: the forearm stands up as the neck, the wrist folds forward, and fingers and thumb make the bill.
+        const open = Math.max(0, Math.sin(s*3.1))*smooth(0.3, 0.6, Math.sin(s*0.9 + 1));
+        P.tgt.set(0.30, 0.00 + 0.012*Math.sin(s*1.1), 0.33); P.pole.set(0.2,-1,0.25); P.palm.set(0,-0.3,1);
+        pointHand(tv.set(0, 0.10 + 0.10*Math.sin(s*0.7), 1).normalize(), 0.5, 1.15);
+        for (let f = 1; f < 5; f++) { P.curl[f][0] = 0.30 - 0.22*open; P.curl[f][1] = 0.12; P.curl[f][2] = 0.06; }
+        setThumb(THUMB.beak, [0.35, 0.25, 0.30, 0.95, 0], 0.55 + 0.45*open);
+      } else {
+        // Rabbit: palm forward, two fingers up for ears, the other two and the thumb closed into a round head.
+        const tw = Math.max(0, Math.sin(s*2.3 + 1))**4;
+        P.tgt.set(0.30, 0.00, 0.36); P.pole.set(0.2,-1,0.1); P.palm.set(0,0.1,1);
+        pointHand(tv.set(0, 1, 0.12).normalize(), 0.5, 1.1);
+        P.curl[1][0] = -0.12 + 0.25*tw; P.curl[1][1] = 0.02; P.curl[1][2] = 0.02;
+        P.curl[2][0] = 0.38 + 0.20*tw; P.curl[2][1] = 0.10; P.curl[2][2] = 0.05;
+        fistBlend(3, 1); fistBlend(4, 1);
+        setThumb(THUMB.fist, THUMB.fist, 0);
+      }
+    } },
+  rps: { label:'Rock paper scissors', hint:'Pick rock, paper or scissors with the buttons, or keys R, P, S. The hand picks at random.',
+    fn(t, dt) {
+      const R = RPS, beat = 0.44; R.t += dt;
+      let bob = 0.006*Math.sin(t*1.7), k = 0;
+      if (R.phase === 'pump') {                          // three pumps of the fist; the shape comes out on the way down from the third
+        const ph = R.t/beat; bob = 0.075*Math.sin(PI*(ph % 1))**0.8; k = smooth(2.5, 2.95, ph);
+        if (ph >= 3) { R.phase = 'show'; R.t = 0; bob = 0; k = 1; rpsResult(); }
+      } else if (R.phase === 'show') { k = 1; if (R.t > 2.4) R.phase = 'wait'; }
+      const paper = R.me === 1 ? k : 0, sci = R.me === 2 ? k : 0;
+      P.tgt.set(0.15, -0.15 + bob, 0.35); P.tgtW = 14; P.pole.set(0.7,-0.9,-0.3);
+      P.palm.set(-1 + 0.9*paper + 0.3*sci, -0.15 - 0.85*paper - 0.5*sci, 0.05);   // the fist is held thumb up; paper turns palm down
+      for (let f = 1; f < 5; f++) { fistBlend(f, 1 - (paper || (f < 3 ? sci : 0))); P.spread[f] = SPLAY[f]*0.6*paper; }
+      P.spread[1] += 0.28*sci; P.spread[2] -= 1.2*sci;                             // scissors: index and middle part
+      setThumb(THUMB.fist, THUMB.open, paper);
+      P.wflex = 0.05; P.wdev = 0; P.tense = 0.7;
+    } },
 };
+const isPen = m => m === 'write' || m === 'draw';
 let mode = 'reach', view = 'skin', time = 0, paused = false;
 
 /* ───────────────────────── solve + apply ───────────────────────── */
@@ -683,6 +1397,7 @@ function hits(f, P, j0, table) {                         // does finger f, from 
       if (table && cv2.copy(cv).applyQuaternion(Qh).y + W.y < TY + r - 0.0005) return true;                          // table top
     }
     if (orbOn && segPointDist2(a, b, orbH) < (ORB_R + r - 0.004)**2) return true;                                   // ball
+    if (penOn && segDist2(a, b, penA, penB) < (PEN_R + r - 0.0032)**2) return true;                                 // pen
     if (F.thumb) for (let g = 1; g < 5; g++) {                                                                       // other fingers
       const H = HS[g].p, G = FINGERS[g];
       for (let m = 0; m < 3; m++) if (segDist2(a, b, H[m], H[m+1]) < (r + G.sr[m] - 0.0045)**2) return true;
@@ -701,7 +1416,19 @@ function resolveFinger(f, d0, d1, d2, sp, overTable, dt) {
   const hit = () => { chain(F, q[0], q[1], q[2], q[3], P); return hits(f, P, 0, overTable); };
   const maxStep = 12*dt;
   q[3] += clamp(sp - q[3], -maxStep, maxStep);
-  if (hit()) {
+  if (penOn && f >= 2) {
+    // Holding a pen, the hand rests on its curled fingers. They keep their curl and settle from the knuckle,
+    // as far down as the desk and the pen let them, so they ride along the paper as the hand moves.
+    const prev = q[0], top = want[0]; let a = lo[0];
+    q[1] += clamp(want[1] - q[1], -maxStep, maxStep); q[2] += clamp(want[2] - q[2], -maxStep, maxStep);
+    q[0] = a;
+    if (!hit()) {
+      let b = top, blocked = false;
+      for (let i = 1; i <= 10; i++) { q[0] = lerp(lo[0], top, i/10); if (hit()) { b = q[0]; blocked = true; break; } a = q[0]; }
+      if (blocked) for (let i = 0; i < 5; i++) { const m = (a+b)/2; q[0] = m; if (hit()) b = m; else a = m; }
+    }
+    q[0] = prev + clamp(a - prev, -maxStep, maxStep);
+  } else if (hit()) {
     const c0 = q[0], c1 = q[1], c2 = q[2], set = u => { q[0] = lerp(c0, lo[0], u); q[1] = lerp(c1, lo[1], u*0.7); q[2] = lerp(c2, lo[2], u*0.7); };
     set(1);
     if (hit()) {
@@ -743,7 +1470,9 @@ function update(dt) {
 
   // overlapping action: the hand and fingers drag behind the wrist's velocity (vf, in the forearm frame)
   const dragF = clamp(vf.y*0.55, -0.45, 0.45), dragD = clamp(vf.z*0.55, -0.4, 0.4);
-  P.tgt.y += pushUp;
+  const penMode = isPen(mode);
+  if (!penMode) penK = 0;
+  P.tgt.y += pushUp*(1 - penK);
   tgtS.to(P.tgt, P.tgtW); poleS.to(P.pole); palmS.to(P.palm);
   wflexS.t = clamp(P.wflex - dragF, -1.2, 1.0); wdevS.t = clamp(P.wdev + dragD, -0.5, 0.5);
   for (let f = 0; f < 5; f++) {
@@ -757,9 +1486,12 @@ function update(dt) {
     spreadS[f].t = P.spread[f];
   }
   tenseS.t = P.tense; rollS.t = P.roll; orbVis.t = mode === 'reach' || mode === 'pick' ? 1 : 0;
+  penVis.t = penMode ? 1 : 0; goalVis.t = mode === 'flick' ? 1 : 0; ballVis.t = 1; pupVis.t = mode === 'puppet' ? 1 : 0;
+  if (PEN.sheetT > 0) { paperVis.t = 0; if ((PEN.sheetT -= dt) <= 0) blankSheet(!PEN.script); } else paperVis.t = penMode ? 1 : 0;   // a used sheet slides away and a clean one comes back
   const n = Math.max(1, Math.ceil(dt/0.006)); for (let i = 0; i < n; i++) stepSprings(dt/n);
 
   // ── analytic two-bone IK with a pole vector
+  function solveArm() {
   shS.get(S); root.position.copy(S);
   tgtS.get(toT).sub(S); const dist = toT.length() || 1e-6; dir.copy(toT).divideScalar(dist);
   const d = clamp(dist, 0.18, L1+L2-0.004);
@@ -793,11 +1525,21 @@ function update(dt) {
   hand.quaternion.setFromEuler(eul.set(0, wdevS.x, wflexS.x, 'YZX'));
   Qh.copy(Qt).multiply(hand.quaternion);
   palmPoint.set(0.075,-0.046,0).applyQuaternion(Qh).add(W);
+  }
+  solveArm();
+  // Writing: the springs get the hand near, then the wrist is moved by whatever the pen tip is still off by and the arm is
+  // solved again. Moving the wrist turns the forearm a little, so it takes a few rounds to settle.
+  if (penK > 0) for (let i = 0; i < 3; i++) {
+    tv.copy(GRIP.tip).applyQuaternion(Qh).add(W); tv.subVectors(penT, tv).multiplyScalar(penK).clampLength(0, 0.03);
+    for (let c = 0; c < 3; c++) tgtS.s[c].x += tv.getComponent(c);
+    solveArm();
+  }
 
   // ── fingers: resolve contacts in hand space, then pose the bones (thumb last: it yields to the fingers)
   thumbRoll = rollS.x;
   orbOn = orbVis.x > 0.5; if (orbOn) orbH.copy(orbPos).sub(W).applyQuaternion(q1.copy(Qh).invert());
-  const overTable = W.z > 0.2, ka = 1 - Math.exp(-dt*40);
+  penOn = penVis.x > 0.5;
+  const overTable = W.z > 0.2 || penMode, ka = 1 - Math.exp(-dt*40);
   needLift = 0;
   for (const f of [1,2,3,4,0]) {
     const F = FINGERS[f], b = F.bones, c = curlS[f], S = HS[f];
@@ -823,6 +1565,19 @@ function update(dt) {
 
   orb.position.copy(orbPos); orb.scale.setScalar(Math.max(0.001, orbVis.x)); orb.visible = orbVis.x > 0.02;
   orb.material.emissiveIntensity = 0.55 + 1.1*grip;
+  spiroShow(dt);
+  noteVis.t = mode === 'draw' && NOTE.on ? 1 : 0; if (NOTE.flash > 0 && (NOTE.flash -= dt) <= 0) noteRender();
+  const nv = clamp(noteVis.x, 0, 1); notePaper.visible = nv > 0.01; notePaper.material.opacity = nv; notePaper.position.x = NOTE.cx - (1-nv)*0.05;
+  penObj.visible = penVis.x > 0.02; penObj.scale.setScalar(clamp(penVis.x, 0.001, 1));
+  const gv = clamp(goalVis.x, 0.001, 1); goal.visible = ball.visible = goalVis.x > 0.02; goal.scale.setScalar(gv);
+  ball.position.copy(FB.pos); ball.quaternion.copy(FB.q); ball.scale.setScalar(gv*clamp(ballVis.x, 0.001, 1));
+  aimLine.visible = mode === 'flick' && !FB.auto && (FB.state === 'set' || FB.state === 'charge');
+  if (aimLine.visible) { aimLine.position.set(SPOT.x, TY+0.0008, SPOT.z); aimLine.rotation.y = FB.aim; }
+  const pk = clamp(pupVis.x, 0, 1);                     // lamp up, room down
+  lamp.visible = wall.visible = pk > 0.01; lamp.intensity = 3.4*pk; wall.material.opacity = pk;
+  keyL.intensity = LB.key*(1 - 0.85*pk); hemi.intensity = LB.hemi*(1 - 0.6*pk); rim.intensity = LB.rim*(1 - 0.7*pk); fill.intensity = LB.fill*(1 - 0.7*pk);
+  if (scene.background) scene.backgroundIntensity = 0.36*(1 - 0.6*pk);
+  const pv = clamp(paperVis.x, 0, 1); paper.visible = pv > 0.01; paper.material.opacity = pv; paper.position.x = PAPER.cx - (1-pv)*0.09;
 }
 
 /* ───────────────────────── UI ───────────────────────── */
@@ -833,7 +1588,60 @@ function setMode(m) {
   if (m === 'reach') hold = 0.4; else grip = 0;
   if (m === 'pick') { MODES.pick.tp = 0; MODES.pick.held = false; }
   pushUp = 0;
+  // Some modes have their own view: writing is watched over the writer's shoulder so the page reads the right way up,
+  // and puppets are watched from beside the lamp. Leaving puts the camera back where it was.
+  const cam = MODES[m].cam;
+  if (cam && cam !== camFor) { if (!camHome) camHome = [camera.position.clone(), controls.target.clone()]; flyTo(cam[0], cam[1], true); }
+  else if (!cam && camHome) { flyTo(camHome[0], camHome[1]); camHome = null; }
+  camFor = cam; document.body.classList.toggle('lit', cam === PEN_CAM);
+  PEN.ptr.down = false; RPS.phase = 'wait';
+  if (m === 'rps') subBar(RPS.names.map((nm, i) => [nm, () => rpsPlay(i)])); else if (m === 'puppet') { PUP.t = 0; PUP.auto = true; pupBar(); } else if (m === 'draw') drawBar(); else subBar();
+  if (m === 'flick') { fbReset(); FB.auto = true; FB.aim = 0; }
+  if (m === 'write' && !PEN.greeted) { PEN.greeted = true; type('Hi!\n'); }
+  el.style.cursor = '';
 }
+let camHome = null, camFly = null, camFor = null;
+function flyTo(pos, tgt, backOff) {
+  const k = backOff && camera.aspect < 1.1 ? Math.min(2, 1.15/camera.aspect) : 1;   // further away in portrait windows
+  camFly = { p0:camera.position.clone(), t0:controls.target.clone(), p1:pos.clone().sub(tgt).multiplyScalar(k).add(tgt), t1:tgt.clone(), k:0 };
+}
+// the row of choices above the mode bar: [label, action, selected] entries, or none
+function subBar(items) {
+  const bar = $('sub'); bar.replaceChildren(); bar.hidden = !items || !items.length;
+  for (const [label, fn, on] of items || []) { const b = document.createElement('button'); b.textContent = label; b.onclick = fn; b.classList.toggle('on', !!on); bar.append(b); }
+}
+function drawBar() {
+  if (PEN.script && !NOTE.writing) return subBar([['Stop drawing', stopScript]]);
+  if (NOTE.on) { if (!$('sub').querySelector('textarea')) pasteRow(); return; }
+  subBar([['Ask your Claude for a picture', () => noteOpen()], ...(PEN.pic.length || PEN.words.length || PEN.also.length ? [['Ask it to add more', () => noteOpen(true)]] : []), ['Watch Claude’s cat', () => playStrokes(CAT, 'Claude')], ['Spirograph', spirograph]]);
+}
+// While the request note is out, the row is a box to paste the answer into. Additions (NOTE.more) are drawn on top of the picture.
+function pasteRow() {
+  const ta = document.createElement('textarea'), x = document.createElement('button');
+  ta.spellcheck = false; ta.placeholder = 'Paste your Claude’s reply here'; ta.onfocus = noteDeselect;
+  x.textContent = '✕'; x.title = 'Put the note away'; x.onclick = () => { noteClose(); drawBar(); $('hint').textContent = MODES.draw.hint; };
+  $('sub').hidden = false; $('sub').replaceChildren(ta, x);
+  ta.oninput = () => {
+    if (!ta.value.trim()) return;
+    const list = parseStrokes(ta.value);
+    if (!list.length) { $('hint').textContent = 'No strokes found in that. Paste the whole reply.'; return; }
+    ta.oninput = null; playStrokes(list, null, NOTE.more);
+  };
+}
+const copied = () => { NOTE.flash = 0.7; noteRender(); $('hint').textContent = 'Copied. Give it to your Claude, then paste the reply into the box.'; };
+function copyNote() {                                   // the C on the note: put the whole request on the clipboard
+  const text = notePrompt();
+  const byHand = () => {                                // where the clipboard API is not allowed (a page opened from a file), copy out of a hidden box instead
+    const ta = document.createElement('textarea'); ta.value = text; ta.style.cssText = 'position:fixed; opacity:0'; document.body.append(ta); ta.select();
+    let ok = false; try { ok = document.execCommand('copy'); } catch {}
+    ta.remove(); if (ok) copied(); else $('hint').textContent = 'Could not copy from here. Click the note and press ⌘C or Ctrl+C.';
+  };
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(copied, byHand); else byHand();
+}
+addEventListener('copy', e => {                         // copying with the note selected copies the whole request
+  if (mode !== 'draw' || !NOTE.on || !NOTE.sel || e.target instanceof HTMLTextAreaElement) return;
+  e.clipboardData.setData('text/plain', notePrompt()); e.preventDefault(); copied();
+});
 const VIEWS = { skin:'Skin', xray:'X-ray', weights:'Weights' };
 function setView(v) {
   view = v;
@@ -843,10 +1651,28 @@ function setView(v) {
   for (const g of boneViz) g.visible = v === 'xray' || v === 'bones';
   for (const nl of nails) nl.visible = v === 'skin';
 }
-for (const [k, m] of Object.entries(MODES)) { const b = document.createElement('button'); b.textContent = m.label; b.dataset.k = k; b.onclick = () => setMode(k); $('modes').append(b); }
+const FEATURED = ['write', 'draw', 'flick', 'rps', 'puppet'];   // the bar shows these; the original motions are still in MODES for the showcase recorder
+for (const k of FEATURED) { const m = MODES[k], b = document.createElement('button'); b.textContent = m.label; b.dataset.k = k; b.onclick = () => setMode(k); $('modes').append(b); }
 for (const [k, l] of Object.entries(VIEWS)) { const b = document.createElement('button'); b.textContent = l; b.dataset.k = k; b.onclick = () => setView(k); $('views').append(b); }
 addEventListener('keydown', e => {
-  const ks = Object.keys(MODES), i = +e.key - 1;
+  if (e.target instanceof HTMLTextAreaElement) { if (e.key === 'Escape') e.target.blur(); return; }
+  if (mode === 'draw' && NOTE.on && NOTE.focus) {       // the note has the keyboard: typing rewrites it
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') { if (NOTE.sel) navigator.clipboard?.writeText(notePrompt()).then(copied, () => {}); return; }
+    if (!e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (e.key.length === 1) { noteType(e.key); e.preventDefault(); return; }
+      if (e.key === 'Backspace') { noteBackspace(); e.preventDefault(); return; }
+      if (e.key === 'Enter') { noteSelect(); e.preventDefault(); return; }
+    }
+  }
+  if (isPen(mode) && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    if (e.key === 'Escape') { freshSheet(); e.preventDefault(); return; }
+    if (mode === 'write') {                              // every key is text here, so the shortcuts below are off
+      if (e.key === 'Enter') type('\n'); else if (e.key === 'Backspace') { PEN.queue.pop(); showQueue(); } else if (e.key.length === 1) type(e.key); else return;
+      e.preventDefault(); return;
+    }
+  }
+  if (mode === 'rps' && e.key.length === 1 && 'rps'.includes(e.key.toLowerCase())) { rpsPlay('rps'.indexOf(e.key.toLowerCase())); return; }
+  const ks = FEATURED, i = +e.key - 1;
   if (ks[i]) setMode(ks[i]);
   if (e.key === ' ') { paused = !paused; e.preventDefault(); }
   if (e.key === 'x') setView(view === 'xray' ? 'skin' : 'xray');
@@ -855,7 +1681,38 @@ addEventListener('keydown', e => {
 // orb dragging (registered before OrbitControls so it can claim the pointer first)
 const el = renderer.domElement, ray = new THREE.Raycaster(), ndc = new THREE.Vector2(), plane = new THREE.Plane();
 const setRay = e => { ndc.set(e.clientX/innerWidth*2-1, -(e.clientY/innerHeight)*2+1); ray.setFromCamera(ndc, camera); };
+// where on the page the pointer is, in page coordinates, or null if the ray misses the desk
+const pagePlane = new THREE.Plane(AY.clone(), -PAPER.y);
+const pagePoint = e => { setRay(e); return ray.ray.intersectPlane(pagePlane, tv) ? [PX0 - tv.x, tv.z - PZ0] : null; };
+const onPage = (q, m = 0) => q && q[0] > -m && q[0] < PAPER.w + m && q[1] > -m && q[1] < PAPER.h + m;
+let inking = false, winding = false, noteTap = false;
+const onNoteC = q => onNote(q) && q[0] > NOTE.u0 + NOTE.w - 0.015 && q[1] > NOTE.v0 + NOTE.h - 0.015;
+const onNote = q => q && q[0] > NOTE.u0 && q[0] < NOTE.u0 + NOTE.w && q[1] > NOTE.v0 && q[1] < NOTE.v0 + NOTE.h;
+const onDesk = pt => pt.x > -0.20 && pt.x < 0.54 && pt.z > 0.25 && pt.z < 0.69;
 el.addEventListener('pointerdown', e => {
+  if (mode === 'flick') {                               // press on the desk: aim there and wind up
+    setRay(e); if (!ray.ray.intersectPlane(pagePlane, tv) || !onDesk(tv)) return;
+    FB.auto = false; fbAimAt(tv);
+    if (FB.state === 'set' && ballVis.x > 0.9) { FB.state = 'charge'; FB.t = 0; }
+    winding = true; controls.enabled = false; el.setPointerCapture(e.pointerId);
+    return;
+  }
+  if (isPen(mode)) {
+    const q = pagePoint(e);
+    if (mode === 'draw' && NOTE.on) {                     // a click on the note selects it; a click anywhere else lets go of it
+      if (onNote(q)) { document.activeElement?.blur?.(); noteSelect(); if (onNoteC(q)) copyNote(); noteTap = true; controls.enabled = false; return; }
+      noteDeselect();
+    }
+    if (!onPage(q)) return;
+    if (mode === 'draw' && PEN.script) return;
+    if (mode === 'draw') {                               // press on the paper: the pen comes down and the camera stays put
+      inking = true; controls.enabled = false; el.setPointerCapture(e.pointerId);
+      PEN.ptr.u = q[0]; PEN.ptr.v = q[1]; PEN.ptr.down = true;
+    } else if (!PEN.queue.length && !PEN.jobs.length) {  // click on the paper: carry on writing from there
+      PEN.line = clamp(Math.round((LINE0 - q[1] + 0.004)/LINEGAP), 0, NLINES-1); PEN.caret = clamp(q[0], MARGIN_L, PAPER.w - MARGIN_R - 0.01); PEN.wordStart = true;
+    }
+    return;
+  }
   if (mode !== 'reach') return;
   setRay(e);
   if (ray.intersectObject(orbHit).length) {
@@ -864,19 +1721,33 @@ el.addEventListener('pointerdown', e => {
   }
 }, true);
 el.addEventListener('pointermove', e => {
+  if (mode === 'flick') { setRay(e); if (ray.ray.intersectPlane(pagePlane, tv) && (winding || onDesk(tv))) { FB.auto = false; fbAimAt(tv); } return; }
+  if (isPen(mode)) {
+    const q = pagePoint(e), on = onPage(q), hov = mode === 'draw' && NOTE.on && onNoteC(q);
+    if (hov !== NOTE.hover) { NOTE.hover = hov; noteRender(); }
+    if (mode === 'draw' && q && (inking || onPage(q, 0.02))) { PEN.ptr.u = clamp(q[0], 0.002, PAPER.w-0.002); PEN.ptr.v = clamp(q[1], 0.002, PAPER.h-0.002); }
+    el.style.cursor = mode === 'draw' && NOTE.on && onNote(q) ? 'pointer' : inking || on ? (mode === 'draw' ? 'crosshair' : 'text') : '';
+    return;
+  }
   setRay(e);
   if (dragging) { if (ray.ray.intersectPlane(plane, tv)) { if (tv.length() > 0.8) tv.setLength(0.8); tv.y = Math.max(tv.y, (tv.z > 0.26 ? TY : FLOOR) + 0.034); orbGoal.copy(tv); } }
   else el.style.cursor = mode === 'reach' && ray.intersectObject(orbHit).length ? 'grab' : '';
 });
-const endDrag = () => { if (dragging) { dragging = false; controls.enabled = true; hold = 6; el.style.cursor = ''; } };
+const endDrag = () => {
+  if (dragging) { dragging = false; controls.enabled = true; hold = 6; el.style.cursor = ''; }
+  if (inking) { inking = false; controls.enabled = true; PEN.ptr.down = false; }
+  if (winding) { winding = false; controls.enabled = true; fbRelease(); }
+  if (noteTap) { noteTap = false; controls.enabled = true; }
+};
 el.addEventListener('pointerup', endDrag); el.addEventListener('pointercancel', endDrag);
 
 const controls = new OrbitControls(camera, el);
-controls.target.set(0.15,-0.20,0.22); controls.enableDamping = true; controls.minDistance = 0.5; controls.maxDistance = 4; controls.maxPolarAngle = PI*0.62;
+controls.addEventListener('start', () => camFly = null);   // taking hold of the camera cancels a flight
+controls.target.set(0.15,-0.20,0.22); controls.enableDamping = true; controls.minDistance = 0.3; controls.maxDistance = 4; controls.maxPolarAngle = PI*0.62;
 if (camera.aspect < 1.1) camera.position.sub(controls.target).multiplyScalar(Math.min(2, 1.15/camera.aspect)).add(controls.target);  // back off in portrait windows
 addEventListener('resize', () => { camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
 
-setMode('reach'); setView('skin');
+setMode('write'); setView('skin');
 document.getElementById('loading')?.remove();
 const clock = new THREE.Clock(); let hudT = 0;
 let directing = false;
@@ -884,6 +1755,11 @@ function frame() {
   if (directing) { requestAnimationFrame(frame); return; }
   const dt = Math.min(clock.getDelta(), 0.05);
   if (!paused) update(dt);
+  if (camFly) {
+    const c = camFly, e = smooth(0, 1, c.k = Math.min(1, c.k + dt/1.3));
+    camera.position.lerpVectors(c.p0, c.p1, e); controls.target.lerpVectors(c.t0, c.t1, e);
+    if (c.k >= 1) camFly = null;
+  }
   controls.update();
   renderer.render(scene, camera);
   if ((hudT += dt) > 0.1) {
@@ -976,7 +1852,7 @@ async function direct({ fps = 60, PW = 1080, PH = 810, every = 1, post = '/frame
   setView('skin'); directing = false; paused = false;
   return { frames: sent, seconds: n/fps };
 }
-window.rig = { direct, envReady, dbg:{ get pushUp() { return pushUp; }, setRoll: v => thumbRoll = v, chain, hits, HS, FINGERS, resolveFinger, P, curlS, spreadS }, setMode, setView, bones, arm, camera, controls, setTime: t => time = t, step: (s) => { for (let i = 0; i < s*60; i++) update(1/60); }, pause: v => paused = v };
+window.rig = { type, spirograph, SPIRO, NOTE, noteOpen, noteType, notePrompt, noteCanvas:noteCv, rpsPlay, RPS, FB, PUP, pupPick, playStrokes, parseStrokes, ASK, CAT, pen:{ canvas:inkCv, GRIP, PEN, FONT, seatPen, freshSheet, get k() { return penK; }, tip: () => tv.copy(GRIP.tip).applyQuaternion(Qh).add(W).toArray(), target: () => penT.toArray() }, direct, envReady, dbg:{ get pushUp() { return pushUp; }, setRoll: v => thumbRoll = v, chain, hits, HS, FINGERS, resolveFinger, P, curlS, spreadS }, setMode, setView, bones, arm, camera, controls, setTime: t => time = t, step: (s) => { for (let i = 0; i < s*60; i++) update(1/60); }, pause: v => paused = v };
 </script>
 </body>
 </html>
