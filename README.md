@@ -1,6 +1,6 @@
 # Procedural rigged arm: extras
 
-A fork of [apekshik/procedural-arm-rig](https://github.com/apekshik/procedural-arm-rig) that gives the arm some new things to do: write, draw, flick a paper football, play rock paper scissors, make shadow puppets, toss a ball and juggle two, in columns or in circles. The original motions (Reach & grab through Rest) are still in the code and drive the showcase recorder, but the bar on this page only shows the additions. Go to the original to play with those.
+A fork of [apekshik/procedural-arm-rig](https://github.com/apekshik/procedural-arm-rig) that gives the arm some new things to do: write, draw, flick a paper football, play rock paper scissors, make shadow puppets, toss a ball, juggle two in one hand, and pass one, two or three between two hands. For that it has grown a second arm. The original motions (Reach & grab through Rest) are still in the code and drive the showcase recorder, but the bar on this page only shows the additions. Go to the original to play with those.
 
 A human arm and hand built entirely in code with three.js: the mesh, the skeleton, the skin weights and the motion. There are no model files and no animation clips. Everything lives in one HTML file.
 
@@ -18,7 +18,7 @@ For this fork, open `index.html` in a browser. It loads three.js and the lightin
 - **Paper football**: point at the desk to aim, hold to wind up the finger, let go to flick the paper triangle at the goal. Left alone, the hand takes its own shots, and misses some.
 - **Rock paper scissors**: pick with the buttons or keys R, P, S. The hand pumps its fist three times and throws a shape it picked at random.
 - **Shadow puppets**: a lamp throws the hand's shadow on a wall. Pick Dog, Swan or Rabbit, or let them take turns.
-- **Toss**: **Toss one** throws a ball up and catches it; **Just hold** holds it. **Columns** and **Circles** hand in a second ball and the hand keeps both going, two in one hand; the line above the buttons counts the catches in a row, and you can change from one pattern to the other without the hand stopping. Drag a ball to take it away, then drop it, lob it at the hand, press it into the palm, or leave it on the desk. Break the pattern and the hand gets hold of one ball and starts again.
+- **Toss**: **Toss one** throws a ball up and catches it; **Just hold** holds it. **Columns** and **Circles** hand in a second ball and the hand keeps both going, two in one hand; you can change from one pattern to the other without the hand stopping. **Pass one**, **Pass two** and **Cascade** use both hands: one ball thrown from hand to hand, then two, then all three in a cascade. The line above the buttons counts the catches in a row. Drag a ball to take it away, then drop it, lob it at the hand, press it into the palm, or leave it on the desk. Break the pattern and the hand gets hold of one ball and starts again.
 - **Views** (top right): Skin, X-ray (bones inside translucent skin), Weights.
 - Drag to orbit, scroll to zoom, Space to pause (outside Write).
 
@@ -49,12 +49,17 @@ For this fork, open `index.html` in a browser. It loads three.js and the lightin
 
 - The balls are beanbags. On skin they grip or slide but do not roll. A ball that rolls in the palm takes up only two sevenths of the hand's sideways motion, drifts between catch and throw, and leaves crooked; this was the difference between runs of ten catches and runs that do not end.
 - The palm is dead level. The single ball is held on a palm tipped toward the thumb so that it nestles there, but that tilt kicks every fast catch sideways.
+- The arm is where a juggler's is: the elbow hangs at the side, the forearm points forward and stays near level, and the hand works in front of the shoulder. Palm up with the forearm forward is the forearm turned out as far as it goes, so in this mode it is allowed the full quarter turn, and the patterns are kept to the strip in front of the shoulder where that is enough. The desk slides aside to make room: with it there the hand had to work at chest height to clear it, and the elbow had to come forward and across to keep the palm level up there.
 - The hand does not drop away from a ball it has caught, and does not pull it sideways harder than its grip on the palm allows, which is its weight plus the push under it.
 - The arm is told how its target is really moving, speed and push, read off the target frame to frame, so it follows the plan instead of trailing it. That includes the hand turning about the wrist as the arm swings.
 - The hand measures each throw as the ball leaves and corrects the next one: how high, and which way it leaned. One lean is known in advance: carrying a ball across swings the forearm, the swing is still in the hand as it throws, and the throw is aimed to allow for it in proportion to the carry.
 - The balls are kept from colliding. In columns a ball caught off its lane is thrown from the hand's own side of the other ball's path. In circles the inside is never nearer than a set distance to where the other ball is coming down, and the circle is turned a little front to back, which adds room as they pass.
 - A change of pattern is taken up at the next catch, and a ball already in the air from the old pattern is treated as what it is: something coming down at a known place, to be kept clear of.
 - The tossing hand is simulated in steps of one fixed size, however unevenly the frames arrive. A throw's speed is set in its last few steps, so steps of varying length make throws of varying height.
+
+**Two arms.** There is one arm's worth of code and state. The right arm is the same code run a second time each frame, in a world mirrored left to right about the middle of the torso: its state is put in place, the frame is worked out as if for a left arm, and the state is put aside again. Its bones are a copy of the left arm's, drawn under a mirror, and the balls are mirrored while it deals with them. So the right arm is exactly the left arm's mirror image, and everything tuned for one holds for the other. Outside Toss it hangs at rest.
+
+**Passing.** Passing is a three-ball cascade with one, two or all three of its balls, which is also how a person learns it. The hands take turns on a steady beat. Each catches on its outside, carries the ball in toward the middle, and throws it up and across to come down on the other hand's outside three beats later, by which time that hand has thrown what it held. With fewer than three balls the same beats go by empty. Each hand runs the one-hand planner in its own mirrored world. The place a hand throws from is far enough inside the place it catches that the ball going up and the one coming down move apart from the moment of the throw. With three balls the third is let go in the air above the left hand's catching place, timed to land when a thrown one would.
 
 **Scripted pictures.** A picture is plain text, one pen stroke per line: `x,y x,y x,y ...` in millimetres on the 210 x 148 page, origin at the bottom-left. A smooth curve is fitted through the points, `!` after a point makes a sharp corner, and a stroke that ends on its first point is closed. Lines that are not strokes are ignored, so a whole chat reply can be pasted in. The strokes go through the same planner as handwriting.
 
@@ -86,11 +91,11 @@ The shot list, camera moves and ball path are in the `direct()` function in `ind
 
 ## Known limits
 
-- Only the fingers collide. The forearm and palm can pass through the table or the torso.
+- Only the fingers collide. The forearm and palm can pass through the table or the torso, and an arm hanging at the side overlaps the torso's outline.
 - Neighbouring fingers do not collide with each other.
 - There is a faint seam at the wrist where the arm skin meets the hand skin.
 - The wood and the skin are generated in code and are stylised, not photographic.
 - The pen appears in the hand instead of being picked up, and the hand covers part of the line it has just written, as a left hand does.
 - A tossed ball is only held by what is under and around it. The fingers stop where they touch and do not squeeze, so there is no grip that holds against gravity with the palm turned down, and the hand cannot pick a ball up: a dropped ball fades out and is handed back in the air.
-- Juggling starts with the second ball let go in the air above its lane, because the hand cannot hold two. The elbow sits in front of the chest for it, which is where the wrist and forearm have the range to keep the palm level through the whole throw.
+- Juggling starts with the second ball let go in the air above its lane, because the hand cannot hold two.
 - Write needs a physical keyboard; on a touch screen only Draw takes input.
