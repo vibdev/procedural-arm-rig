@@ -532,7 +532,7 @@ const spreadS = FINGERS.map(() => sp(0, 12, 0.8));
 const rollS = sp(0, 10, 0.85), bicepS = sp(0, 8), tenseS = sp(0, 8), orbVis = sp(1, 9), levelS = sp(0, 7), deskS = sp(0, 5);   // deskS: how far aside the desk is, 0 to 1
 
 /* ───────────────────────── behaviours: each writes a desired pose, springs do the rest ───────────────────────── */
-const P = { tgt:new V3(), pole:new V3(), palm:new V3(), tgtW:9, wflex:0, wdev:0, tense:0, firm:0, level:null,
+const P = { tgt:new V3(), pole:new V3(), palm:new V3(), tgtW:9, wflex:0, wdev:0, tense:0, firm:0, level:null, poleW:5,
             curl:FINGERS.map(() => [0,0,0]), spread:[0,0,0,0,0] };
 // Finger poses, read off single-hand reference footage. Each row is [knuckle, middle joint, end joint]; rows are index → pinky.
 const OPEN  = [null,[-0.10,0.04,0.02],[-0.10,0.04,0.02],[-0.08,0.05,0.03],[-0.06,0.06,0.03]];   // flat and fanned, knuckles bent back a touch
@@ -1503,7 +1503,7 @@ function tipY(F, c0, c1, c2) {                        // world height of a finge
    the ball landing in an open hand that gives under it, and a ball on a tilted or open hand rolls off. */
 const TOSS = { hold:new V3(0.05,-0.22,0.30), pole:new V3(-0.1,-1,-0.5),   // the elbow hangs at the side and the forearm points forward: the hand works in front of the shoulder
                heft:0.25, wrist:0.6, slack:0.0035, roll:60, bag:1,   // heft: a ball's mass as a share of the arm's; slack: how far a ball sinks into a finger (a finger stops closing at 4 mm, so it wins); roll: how fast skin stops a ball rolling; bag: the balls are beanbags
-               ry:-0.14, ly:-0.19, z:0.30, low:-0.37, box:[-0.15, 0.25, 0.19, 0.43],   // the heights a ball is let go and caught at, how far forward, how low the hand may go, and how far it will go for a catch (x from, x to, z from, z to)
+               ry:-0.14, ly:-0.19, z:0.30, low:-0.37, box:[-0.50, 0.25, 0.19, 0.43],   // the heights a ball is let go and caught at, how far forward, how low the hand may go, and how far it will go for a catch (x from, x to, z from, z to)
                give:1.0, drop:0.34, tight:28, sink:6, hang:0.6, grip:0.3, open:0.25, openAt:0.06, learn:0.3, supine:1.65,
                pdmin:0.22, pfirst:0.32, follow:0.5 };   // the least a ball is held, how long before the first beat the hands wind up, and how far along with a ball a hand moves to meet it
 const BALLS = [0, 1, 2].map(i => ({ i, dest:-1, hand:0, beat:0, thrown:-9, p:new V3(), v:new V3(), w:new V3(), q:new Quat(), goal:new V3(), spot:new V3(), st:'pin', t:0, since:9, rest:0, grab:false, vis:null, mesh:null }));
@@ -1569,6 +1569,7 @@ function ballTouch(b, n, depth, vc, mu, bounce, roll, h, part) {
   }
   b.w.multiplyScalar(Math.exp(-roll*h));                 // soft things, skin most of all, take the roll out of a ball
   if (part === 2) { b.since = 0; b.hand = curArm; }
+  if (part) { b.arm = curArm; b.armT = TB.now; }
 }
 let curArm = 0;
 function ballHand(b, A, s, h, dt) {                     // one small step of one ball against one arm; the ball is already in that arm's own (perhaps mirrored) world
@@ -1711,7 +1712,7 @@ function tossTail(C, goal, dt, jug) {                    // from what a hand's c
    and the other hand's catching place is that hand's `x out` seen in the mirror. */
 const mkHand = k => ({ k, ball:null, state:'track', t:0, carry:new V3().copy(TOSS.hold), away:0, calm:0, has:false, ff:new V3(), vT:0, bear:0,
   pp:new V3(), pv:new V3(), acc:new V3(), rel:new V3(), want:new V3(), tgtPrev:new V3(), tgtVel:new V3(), tgtOk:0,
-  phase:'empty', held:null, flown:null, tRel:0, first:false, still:false, meas:false, late:0, gain:1.08, leans:[0, 1, 2, 3, 4, 5, 6].map(() => new V3()), throw:3, threw:3, vy:0, dx:0 });
+  phase:'empty', held:null, flown:null, tRel:0, first:false, still:false, meas:false, late:0, gain:1.08, leans:[0, 1, 2, 3, 4, 5, 6].map(() => new V3()), throw:3, threw:3, last:0, vy:0, dx:0, from0:0 });
 const KH = [mkHand(0), mkHand(1)];
 const PS = { phase:'gather', pat:'cascade', t0:0, tDrop:-1, spare:null, why:'' };
 const jugSay = text => { if (mode === 'toss') document.getElementById('hint').textContent = text; };
@@ -1744,9 +1745,25 @@ function passFail(why) {                                 // the pattern is lost:
 // each comes down (for a crossing throw, in the other hand's terms). In a cascade everything is caught outside and thrown from inside. In
 // 4 2 3 the high throws go straight up and down in a lane on the outside, and the crossing ones are caught further in, clear of that lane.
 const PATS = { cascade:{ seq:[3], beat:0.30, pd:0.34, from:[-0.10, 0.13], to:[0.13, 0.13] },
-               w:{ seq:[4, 2, 3], beat:0.27, pd:0.31, from:[-0.11, 0.14], to:[0.00, 0.14] } };
+               w:{ seq:[4, 2, 3], beat:0.27, pd:0.31, from:[-0.11, 0.14], to:[0.00, 0.14] },
+               // Mills Mess is a cascade in its timing. What makes it is where the hands are: `T` is where each beat's throw is let go and `C` where the
+               // hand then goes for its next catch. Each is [sideways from the middle of the body, outward for the hand in question; up or down from the
+               // usual height; forward or back from the usual depth]. So a hand throws twice from across the body, arms crossed, and once from its own
+               // side, and every catch is near the middle. The arm that reaches across goes over the other one: a hand about to cross catches high and
+               // throws from across high, and a hand staying on its own side catches low and throws low. `elbow` moves each elbow up and back, by `out`,
+               // while its hand is in toward the middle (between `at[1]` and `at[0]` out from it), which keeps it from under the arm coming across.
+               // These numbers were found by search: about two thousand layouts were run and scored on catches, drops, balls touching the wrong arm,
+               // and how long the forearms spent inside each other. With these they do not touch.
+               mills:{ seq:[3], beat:0.32, pd:0.383, off:1, lead:0.95, settle:0.09, far:0.27,
+                       T:[[-0.17,0.167,-0.044], [0.14,-0.061,0.10], [-0.17,0.167,-0.044]], C:[[0.025,-0.114,-0.047], [-0.025,0.15,0.05], [0,0.15,0.05]],
+                       elbow:{ out:[-0.10,0.50,-0.46], at:[0.093,0.183], w:12.8 } } };
 const pat = () => PATS[PS.pat];
 const beatAt = j => PS.t0 + j*pat().beat;
+const patAt = (R, list, j) => list[(((j + (R.off || 0)) % list.length) + list.length) % list.length];
+// Where the throw on beat j is let go, where it comes down, and where a hand goes for its next catch after its throw on beat j: all in the world of the hand in question.
+function passRel(R, j, n, out) { const T = TOSS; if (!R.T) return out.set(R.from[n % 2 ? 0 : 1], T.ry, T.z); const e = patAt(R, R.T, j); return out.set(MID + e[0], T.ry + e[1], T.z + e[2]); }
+function passLand(R, j, n, out) { const T = TOSS; if (!R.T) return out.set(n % 2 ? MIRROR - R.to[0] : R.to[1], T.ly, T.z); const e = patAt(R, R.C, j + 1); return out.set(MID - e[0], T.ly + e[1], T.z + e[2]); }
+function passCatch(R, j, out) { const T = TOSS; if (!R.T) return out.set(R.to[0], T.ly, T.z); const e = patAt(R, R.C, j); return out.set(MID + e[0], T.ly + e[1], T.z + e[2]); }
 function passDue(b) {                                    // the beat on which a held ball is next thrown: it skips the beats it is held through
   const q = pat().seq; let guard = 0;
   while (q[((b.beat % q.length) + q.length) % q.length] === 2 && guard++ < 8) b.beat += 2;
@@ -1755,7 +1772,7 @@ function passDue(b) {                                    // the beat on which a 
 function passGather(H, dt, goal) {                       // get hold of this hand's ball and hold it; when every hand is ready, start
   const T = TOSS, n = TB.n;
   if (H.ball) H.ball.spot.copy(T.hold).y += 0.10;
-  if (H.k === 0 && PS.spare) PS.spare.spot.set(pat().to[0], T.ly + T.drop, T.z);
+  if (H.k === 0 && PS.spare) passCatch(pat(), 0, PS.spare.spot).y += T.drop;
   soloHand(dt, goal, H);
   if (!H.ball) { H.carry.copy(T.hold); goal.copy(H.carry); H.has = false; }
   if (H.k !== 0) return;                                 // (the left hand is worked out second, so it is the one to look round)
@@ -1763,9 +1780,9 @@ function passGather(H, dt, goal) {                       // get hold of this han
   if (!ready(KH[0]) || (n >= 2 && !ready(KH[1])) || (PS.spare && !(PS.spare.st === 'pin' && PS.spare.t > 0.6 && PS.spare.vis.x > 0.9))) return;
   // The left hand's ball goes on beat 0 and the right hand's on beat 1. The third is let go in the air so as to land in the left hand
   // in time for beat 2, as a thrown one would.
-  PS.phase = 'run'; PS.t0 = TB.now + T.pfirst; TB.run = 0;
+  PS.phase = 'run'; PS.t0 = TB.now + (pat().lead || T.pfirst); TB.run = 0;   // (a pattern that starts with a hand across the body gives it time to get there)
   for (const h of KH) {
-    h.pp.copy(h.carry); h.pv.set(0,0,0); h.meas = false; h.late = 0;
+    h.pp.copy(h.carry); h.pv.set(0,0,0); h.meas = false; h.late = 0; h.last = h.k; h.leans.forEach(l => l.set(0,0,0));
     if (h.ball) { h.phase = 'carry'; h.held = h.ball; h.first = true; h.ball.beat = h.k; h.throw = passDue(h.ball); h.tRel = beatAt(h.ball.beat); } else { h.phase = 'empty'; h.held = null; }
   }
   if (PS.spare) { PS.spare.beat = 2; PS.tDrop = beatAt(2) - pat().pd - Math.sqrt(2*T.drop/9.81); } else PS.tDrop = -1;
@@ -1781,11 +1798,12 @@ function passRun(H, dt, goal) {
     if (H.meas && th && th.since > 0.04) {               // the ball has left: see how it really went, and correct the next throw of that kind
       const got = th.v.y + 9.81*th.since, ex = H.want.x - th.v.x, ez = H.want.z - th.v.z, ln = H.leans[H.threw];
       if (got > 1) H.gain = clamp(H.gain*Math.pow(clamp(H.vy/got, 0.85, 1.18), 0.6), 0.8, 1.8);
-      if (Math.hypot(ex, ez) < 0.25) { ln.x = clamp(ln.x + T.learn*ex, -0.4, 0.4); ln.z = clamp(ln.z + T.learn*ez, -0.4, 0.4); }
+      if (Math.hypot(ex, ez) < 0.45) { ln.x = clamp(ln.x + T.learn*ex, -0.5, 0.5); ln.z = clamp(ln.z + T.learn*ez, -0.5, 0.5); }
       H.meas = false;
     }
     let nx = null, tl = -1;                              // the ball on its way to this hand that will be here first
-    for (const b of BALLS) if (b.i < TB.n && b.st === 'play' && b.dest === k && now - b.thrown > 0.2) { const t = landing(b, T.ly, bU); if (!nx || (t >= 0 && (tl < 0 || t < tl))) { nx = b; tl = t; } }
+    const yc = passCatch(R, H.last, bU).y;
+    for (const b of BALLS) if (b.i < TB.n && b.st === 'play' && b.dest === k && now - b.thrown > 0.2) { const t = landing(b, yc, bU); if (!nx || (t >= 0 && (tl < 0 || t < tl))) { nx = b; tl = t; } }
     if (nx && nx.since < 0.05 && nx.hand === k && nx.p.distanceTo(palmPoint) < 0.09) {   // caught: it goes on the beat it was thrown to, or the next one this hand has if that has gone
       TB.caught++; TB.best = Math.max(TB.best, ++TB.run); jugSay(`${passSays()} ${TB.run} ${TB.run === 1 ? 'catch' : 'catches'} in a row.`);
       H.held = nx; nx.dest = -1; H.phase = 'carry'; H.first = false;
@@ -1793,33 +1811,50 @@ function passRun(H, dt, goal) {
       H.throw = passDue(nx); H.tRel = beatAt(nx.beat);
     } else {
       H.has = false; TP.g = 0.2; TP.push = 0; moved = true;
-      if (nx && tl >= 0) { landing(nx, T.ly, bL); pathStep(H.pp, H.pv, bL, bV.set(T.follow*nx.v.x, -T.give, T.follow*nx.v.z), tl, dt, H.acc); H.late = 0; }   // arrive moving with it, down and partly along
+      if (nx && tl >= 0) { landing(nx, yc, bL); pathStep(H.pp, H.pv, bL, bV.set(T.follow*nx.v.x, -T.give, T.follow*nx.v.z), tl, dt, H.acc); H.late = 0; }   // arrive moving with it, down and partly along
       else if (nx) { if ((H.late += dt) > 0.15) return passFail('missed a catch'); H.pp.addScaledVector(H.pv, dt); H.acc.set(0,0,0); }
-      else pathStep(H.pp, H.pv, bL.set(R.to[0], T.ly + 0.02, T.z), ZERO, 0.22, dt, H.acc);   // nothing on its way: wait where one would land
+      else { passCatch(R, H.last, bL).y += 0.02; pathStep(H.pp, H.pv, bL, ZERO, 0.22, dt, H.acc); }   // nothing on its way: wait where one would land
     }
   }
   if (H.phase === 'carry' && !moved) {
     const left = H.tRel - now, px = H.pp.x, py = H.pp.y, pz = H.pp.z, vx = H.pv.x, vy0 = H.pv.y, vz = H.pv.z;
     H.has = true;
-    if (left > Math.max(T.pfirst, R.pd + 0.02)) {         // holding: not yet time to wind up. The hand comes to rest where it will throw from
-      pathStep(H.pp, H.pv, bL.set(R.from[H.throw % 2 ? 0 : 1], T.ly - 0.03, T.z), ZERO, Math.min(0.2, left - T.pfirst), dt, H.acc); TP.g = T.grip; H.still = true;
+    const wind = Math.max(T.pfirst, R.pd + 0.02);
+    if (left > wind) {                                   // holding: not yet time to wind up. The hand takes the ball to where it will throw from, no faster than it can be carried
+      if (R.T) passCatch(R, H.held.beat - 2, bL).y -= 0.03; else passRel(R, H.held.beat, H.throw, bL).y -= 0.08;   // (where the hands share their places, it waits where it would have caught the ball)
+      pathStep(H.pp, H.pv, bL, ZERO, left - wind, dt, H.acc); TP.g = T.grip; H.still = true;
+      const side = Math.hypot(H.acc.x, H.acc.z), most = 0.5*T.hang*9.81;
+      if (side > most) { const q = most/side; H.acc.x *= q; H.acc.z *= q; H.pv.x = vx + H.acc.x*dt; H.pv.z = vz + H.acc.z*dt; H.pp.x = px + H.pv.x*dt; H.pp.z = pz + H.pv.z*dt; }
     }
     else {
       // A throw of n lands n beats on, less the time the next hand holds it; that fixes how long it flies and so how fast it goes up.
       // Odd throws go across to the other hand's catching place (its `x out` in the mirror), even ones to this hand's own.
-      const n = H.throw, F = n*R.beat - R.pd, vy = (0.5*9.81*F*F - (T.ry - T.ly))/F, slow = H.first || H.still;
-      H.rel.set(R.from[n % 2 ? 0 : 1], T.ry, T.z); H.dx = H.rel.x - px;
-      H.want.set(((n % 2 ? MIRROR - R.to[0] : R.to[1]) - H.rel.x)/F, 0, (T.z - H.rel.z)/F);
-      bL.copy(H.want).add(H.leans[n]); bL.y = H.gain*vy; H.vy = vy;
+      const n = H.throw, F = n*R.beat - R.pd, slow = H.first || H.still;
+      const j = H.held.beat, kind = R.T ? (((j + (R.off || 0)) % R.T.length) + R.T.length) % R.T.length : n;   // throws are corrected kind by kind: by where in the pattern they come, or by their height
+      passRel(R, j, n, H.rel); passLand(R, j, n, bU);
+      if (R.T && !slow && left > R.pd - 0.05) H.from0 = px;   // (where this carry began)
+      if (R.T && !slow) H.rel.x = H.from0 + clamp(H.rel.x - H.from0, -R.far, R.far);   // a ball caught out of place is not carried further than a hand can carry one in the time
+      H.dx = H.rel.x - px;
+      const vy = (0.5*9.81*F*F - (H.rel.y - bU.y))/F;
+      H.want.set((bU.x - H.rel.x)/F, 0, (bU.z - H.rel.z)/F);
+      bL.copy(H.want).add(H.leans[kind]); bL.y = H.gain*vy; H.vy = vy;
       pathStep(H.pp, H.pv, H.rel, bL, left, dt, H.acc);
+      if (R.settle) {
+        // Where a throw goes back the way the ball was carried, the hand is at the throw's place and sideways speed a moment early, and only
+        // drifts with it from there: the speed the ball leaves with is then one the hand has settled at, not one it is still turning round to.
+        const ny = H.pp.y, nv = H.pv.y, na = H.acc.y;
+        H.pp.set(px, py, pz); H.pv.set(vx, vy0, vz);
+        pathStep(H.pp, H.pv, bA.copy(H.rel).addScaledVector(bL, -R.settle), bL, left - R.settle, dt, bB);
+        H.acc.set(bB.x, na, bB.z); H.pp.y = ny; H.pv.y = nv;
+      }
       const sink = slow ? T.sink : 0;                    // as with one hand: no dropping away from the ball (a throw from a standstill may dip), and no pulling it sideways harder than it grips
       if (H.acc.y < -sink) { H.acc.y = -sink; H.pv.y = vy0 - sink*dt; H.pp.y = py + H.pv.y*dt; }
       const side = Math.hypot(H.acc.x, H.acc.z), most = T.hang*(9.81 + H.acc.y);
       if (side > most && left > dt) { const q = most/side; H.acc.x *= q; H.acc.z *= q; H.pv.x = vx + H.acc.x*dt; H.pv.z = vz + H.acc.z*dt; H.pp.x = px + H.pv.x*dt; H.pp.z = pz + H.pv.z*dt; }
       TP.push = Math.max(0, H.acc.y); TP.g = T.grip - (T.grip - T.open)*smooth(T.openAt, T.openAt - 0.06, left);
       if (left <= dt) {
-        const b = H.held; b.beat += n; b.dest = n % 2 ? 1 - k : k; b.thrown = now;
-        H.flown = b; H.threw = n; H.held = null; H.phase = 'empty'; H.meas = !slow; H.first = H.still = false; H.late = 0; TB.thrown++;
+        const b = H.held; H.last = b.beat; b.beat += n; b.dest = n % 2 ? 1 - k : k; b.thrown = now;
+        H.flown = b; H.threw = kind; H.held = null; H.phase = 'empty'; H.meas = !slow; H.first = H.still = false; H.late = 0; TB.thrown++;
       } else if (H.held.since > 0.12 && left > 0.05) return passFail('came out of the hand');
     }
   }
@@ -1831,15 +1866,22 @@ function passHand(k, dt, goal) {
   if (was === 'gather') passGather(H, dt, goal); else passRun(H, dt, goal);
   if (PS.phase === 'gather' && was === 'run') { goal.copy(H.pp); H.ff.set(0,0,0); }
   tossTail(H, goal, dt, was === 'run' && PS.phase === 'run');
+  const el = pat().elbow;
+  if (el && PS.phase === 'run') {
+    // Where the arms cross, an arm must not find the other one's elbow in its way. While a hand is in toward the middle of the body or
+    // beyond it, that arm's elbow swings out from where it usually hangs, tucked in; it comes back in as the hand goes out to its own side.
+    const inn = 1 - smooth(MID + el.at[0], MID + el.at[1], H.pp.x);
+    P.pole.x += el.out[0]*inn; P.pole.y += el.out[1]*inn; P.pole.z += el.out[2]*inn; P.poleW = el.w;
+  }
 }
-const passSays = () => TB.n < 3 ? ['', 'One ball, hand to hand.', 'Two balls, hand to hand.'][TB.n] : PS.pat === 'w' ? 'Three balls, 4 2 3: one thrown high to the same hand, one held, one thrown across.' : 'Three balls, in a cascade.';
+const passSays = () => TB.n < 3 ? ['', 'One ball, hand to hand.', 'Two balls, hand to hand.'][TB.n] : PS.pat === 'w' ? 'Three balls, 4 2 3: one thrown high to the same hand, one held, one thrown across.' : PS.pat === 'mills' ? 'Three balls, Mills Mess: a cascade with the arms crossing and uncrossing.' : 'Three balls, in a cascade.';
 const passHint = () => passSays() + ' Drag a ball away to break the pattern, and the hands start again.';
 function tossPass(n, name = 'cascade') {                 // pass n balls between two hands, in a pattern
   const C = TB; if (C.n === n && PS.pat === name) return;
   C.n = n; PS.pat = name; passReset(); const cam = name === 'w' ? PASS_CAM2 : PASS_CAM; flyTo(cam[0], cam[1], true);
 }
 function tossBar() {
-  subBar([['Cascade', () => { tossPass(3, 'cascade'); tossBar(); }, PS.pat === 'cascade'], ['4 2 3', () => { tossPass(3, 'w'); tossBar(); }, PS.pat === 'w']]);
+  subBar([['Cascade', () => { tossPass(3, 'cascade'); tossBar(); }, PS.pat === 'cascade'], ['4 2 3', () => { tossPass(3, 'w'); tossBar(); }, PS.pat === 'w'], ['Mills Mess', () => { tossPass(3, 'mills'); tossBar(); }, PS.pat === 'mills']]);
   if (mode === 'toss') document.getElementById('hint').textContent = passHint();
 }
 /* ───────────────────────── the other arm ─────────────────────────
@@ -1885,7 +1927,7 @@ const ARMBONES = hand.userData.index + 1;               // the bones up to and i
 /* A frame is worked out in three passes, each of them once per arm: what the arm wants and where that puts it; then the balls,
    against both arms as they now are; then the fingers, against the balls as they now are. */
 function armWants(k, t, dt) {                           // what this arm is to do
-  P.roll = 0; P.firm = 0; P.level = null;
+  P.roll = 0; P.firm = 0; P.level = null; P.poleW = 5;
   if (k === 0) MODES[mode].fn(t, dt); else if (mode === 'toss') tossHand(1, dt); else MODES.idle.fn(t);
 }
 function armMoves(k, dt) {
@@ -1893,7 +1935,7 @@ function armMoves(k, dt) {
   const loose = 1 - P.firm, dragF = clamp(vf.y*0.55, -0.45, 0.45)*loose, dragD = clamp(vf.z*0.55, -0.4, 0.4)*loose;   // a hand that is carrying something holds its wrist firm
   if (k !== 0 || !isPen(mode)) penK = 0;
   P.tgt.y += pushUp*(1 - penK);
-  tgtS.to(P.tgt, P.tgtW); poleS.to(P.pole); palmS.to(P.palm);
+  tgtS.to(P.tgt, P.tgtW); poleS.to(P.pole, P.poleW); palmS.to(P.palm);
   wflexS.t = clamp(P.wflex - dragF, -1.2, 1.0); wdevS.t = clamp(P.wdev + dragD, -0.5, 0.5);
   for (let f = 0; f < 5; f++) {
     for (let j = 0; j < 3; j++) {
