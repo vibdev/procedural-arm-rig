@@ -483,6 +483,14 @@ const orb = new THREE.Mesh(new THREE.SphereGeometry(0.033, 40, 28),
   new THREE.MeshPhysicalMaterial({ color:0x5fc8ff, emissive:0x1b6fa8, emissiveIntensity:0.7, roughness:0.15, clearcoat:1 }));
 orb.castShadow = true; scene.add(orb);
 const orbHit = new THREE.Mesh(new THREE.SphereGeometry(0.07, 12, 8), new THREE.MeshBasicMaterial({ visible:false })); orb.add(orbHit);
+// In Toss the ball spins, so it wears panels that show it turning.
+const ballMat = col => {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 128; const g = c.getContext('2d');
+  for (let i = 0; i < 4; i++) { g.fillStyle = i % 2 ? '#f3efe6' : col; g.fillRect(i*64, 0, 64, 128); }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+  return new THREE.MeshPhysicalMaterial({ map:t, roughness:0.35, clearcoat:0.5, clearcoatRoughness:0.3 });
+};
+const orbMat = orb.material, tossMat = ballMat('#2f9be8');
 
 /* ───────────────────────── springs: every animated channel is a damped spring ───────────────────────── */
 const ALL = [];
@@ -499,10 +507,10 @@ const shS = new VS(0,0,0, 6), orbS = new VS(0.25,-0.1,0.38, 11, 0.8);
 const twS = sp(0, 13, 0.9), wflexS = sp(0, 12, 0.7), wdevS = sp(0, 12, 0.7);
 const curlS = FINGERS.map((F,f) => [0,1,2].map(j => sp(0.2, 19-2.5*j-0.6*f, 0.72)));   // distal joints & outer fingers lag → overlap
 const spreadS = FINGERS.map(() => sp(0, 12, 0.8));
-const rollS = sp(0, 10, 0.85), bicepS = sp(0, 8), tenseS = sp(0, 8), orbVis = sp(1, 9);
+const rollS = sp(0, 10, 0.85), bicepS = sp(0, 8), tenseS = sp(0, 8), orbVis = sp(1, 9), levelS = sp(0, 7);
 
 /* ───────────────────────── behaviours: each writes a desired pose, springs do the rest ───────────────────────── */
-const P = { tgt:new V3(), pole:new V3(), palm:new V3(), tgtW:9, wflex:0, wdev:0, tense:0,
+const P = { tgt:new V3(), pole:new V3(), palm:new V3(), tgtW:9, wflex:0, wdev:0, tense:0, firm:0, level:null,
             curl:FINGERS.map(() => [0,0,0]), spread:[0,0,0,0,0] };
 // Finger poses, read off single-hand reference footage. Each row is [knuckle, middle joint, end joint]; rows are index → pinky.
 const OPEN  = [null,[-0.10,0.04,0.02],[-0.10,0.04,0.02],[-0.08,0.05,0.03],[-0.06,0.06,0.03]];   // flat and fanned, knuckles bent back a touch
@@ -1069,6 +1077,7 @@ function pointHand(v, dev = 0.4, flex = 0.7) {
   v.applyQuaternion(q1.copy(Qt).invert());
   P.wdev = clamp(Math.atan2(-v.z, v.x), -dev, dev); P.wflex = clamp(Math.asin(clamp(v.y, -1, 1)), -flex, flex);
 }
+const TOSS_CAM = [new V3(1.02,0.16,1.42), new V3(0.14,-0.02,0.34)], JUG_CAM = [new V3(1.33,0.29,2.08), new V3(0.17,0.09,0.34)];   // far enough back that the top of a circle and the hand, above the buttons, are both in view
 const PEN_CAM = [new V3(0.105,0.134,0.281), new V3(0.105,-0.31,0.40)], PUP_CAM = [new V3(1.90,0.12,1.00), new V3(-0.62,0.02,0.50)];
 
 /* ───────────────────────── shadow puppets ─────────────────────────
@@ -1330,6 +1339,8 @@ const MODES = {
         setThumb(THUMB.fist, THUMB.fist, 0);
       }
     } },
+  toss: { label:'Toss', cam:TOSS_CAM, hint:'The ball is a body of its own: the hand throws it by stopping short under it, and catches it by being there. Drag a ball to take it away, drop it or throw it.',
+    fn(t, dt) { tossHand(dt); } },
   rps: { label:'Rock paper scissors', hint:'Pick rock, paper or scissors with the buttons, or keys R, P, S. The hand picks at random.',
     fn(t, dt) {
       const R = RPS, beat = 0.44; R.t += dt;
@@ -1364,9 +1375,10 @@ let flex = 0;
 const ORB_R = 0.033;
 for (const F of FINGERS) { const l = F.len; F.sr = [key(F.rk, l[0]/2), key(F.rk, l[0]+l[1]/2), key(F.rk, l[0]+l[1]+l[2]*0.6)]; }
 const HS = FINGERS.map(() => ({ p:[new V3(),new V3(),new V3(),new V3()], pose:[0.2,0.2,0.2,0], sm:[0.2,0.2,0.2,0] }));
-const cq = new Quat(), cq2 = new Quat(), cv = new V3(), cv2 = new V3(), cd1 = new V3(), cd2 = new V3(), cr = new V3(), orbH = new V3();
+const cq = new Quat(), cq2 = new Quat(), cv = new V3(), cv2 = new V3(), cd1 = new V3(), cd2 = new V3(), cr = new V3(), orbHs = [new V3(), new V3()];
+let wristLevel = 0, levelSlope = 0;                    // a hand kept level whatever the forearm does: the wrist bend that takes, and the slope asked for
 let needLift = 0, pushUp = 0;                          // how much the table is pushing the whole hand up
-let orbOn = false, thumbRoll = 0;                      // thumbRoll: the thumb turning about its own length to face the fingers (opposition)
+let orbN = 0, thumbRoll = 0;                          // thumbRoll: the thumb turning about its own length to face the fingers (opposition)
 function chain(F, c0, c1, c2, sp, out) {                // joint positions in the hand's own frame
   cq.copy(F.quat).multiply(cq2.setFromAxisAngle(AY, sp*F.spreadSign + F.fanFix));
   if (F.thumb) cq.multiply(cq2.setFromAxisAngle(AX, thumbRoll));
@@ -1396,7 +1408,7 @@ function hits(f, P, j0, table) {                         // does finger f, from 
       if (k >= 1 && cv.x > 0 && cv.x < 0.086 && Math.abs(cv.z) < 0.042 && cv.y > -(0.0135+r)+0.0045) return true;   // palm
       if (table && cv2.copy(cv).applyQuaternion(Qh).y + W.y < TY + r - 0.0005) return true;                          // table top
     }
-    if (orbOn && segPointDist2(a, b, orbH) < (ORB_R + r - 0.004)**2) return true;                                   // ball
+    for (let i = 0; i < orbN; i++) if (segPointDist2(a, b, orbHs[i]) < (ORB_R + r - 0.004)**2) return true;        // ball
     if (penOn && segDist2(a, b, penA, penB) < (PEN_R + r - 0.0032)**2) return true;                                 // pen
     if (F.thumb) for (let g = 1; g < 5; g++) {                                                                       // other fingers
       const H = HS[g].p, G = FINGERS[g];
@@ -1451,25 +1463,358 @@ function resolveFinger(f, d0, d1, d2, sp, overTable, dt) {
   }
   chain(F, q[0], q[1], q[2], q[3], P);
 }
-function levelWrist(slope) {                           // wrist flex that makes the hand point along a given slope (0 = level)
+function levelWrist(slope, max = 0.9) {                // wrist flex that makes the hand point along a given slope (0 = level)
   const A = tv.set(1,0,0).applyQuaternion(Qt).y, Bq = tv.set(0,1,0).applyQuaternion(Qt).y, R = Math.hypot(A, Bq);
   if (R < 1e-4) return 0;
   const p0 = Math.atan2(Bq, A), d = Math.acos(clamp(Math.sin(slope)/R, -1, 1)), w1 = p0 - d, w2 = p0 + d;
-  return clamp(Math.abs(w1) < Math.abs(w2) ? w1 : w2, -0.9, 0.9);
+  return clamp(Math.abs(w1) < Math.abs(w2) ? w1 : w2, -max, max);
 }
 function tipY(F, c0, c1, c2) {                        // world height of a fingertip for given joint curls
   const a1 = c0+c1, a2 = a1+c2, l = F.len;
   return tv.set(l[0]*Math.cos(c0)+l[1]*Math.cos(a1)+l[2]*Math.cos(a2), -(l[0]*Math.sin(c0)+l[1]*Math.sin(a1)+l[2]*Math.sin(a2)), 0)
     .applyQuaternion(F.quat).add(tv2.fromArray(F.base)).applyQuaternion(Qh).y + W.y;
 }
+/* ───────────────────────── balls that react ─────────────────────────
+   In Toss nothing carries a ball. It has a velocity and a spin, and gravity pulls on it. The finger capsules, the palm,
+   the forearm, the desk, the floor and the other ball push it out of themselves, with friction, and every push the arm gives
+   a ball comes back on the arm as a kick to its springs. So a throw is the palm stopping short under the ball, a catch is
+   the ball landing in an open hand that gives under it, and a ball on a tilted or open hand rolls off. */
+const TOSS = { hold:new V3(0.19,-0.11,0.36), pole:new V3(-0.6,-1,-0.3), v:3.1, stroke:0.17, wind:0.07, Tw:0.30, stop:35,
+               heft:0.25, wrist:0.6, slack:0.0035, roll:60,   // heft: a ball's mass as a share of the arm's; slack: how far a ball sinks into a finger (a finger stops closing at 4 mm, so it wins); roll: how fast skin stops a ball rolling (they are beanbags)
+               // two in one hand, in columns: each ball goes straight up and comes straight down in a lane of its own, at x = lane[0] or lane[1]
+               lane:[0.11, 0.24], ry:0.00, ly:-0.05, z:0.36, polej:new V3(-1,-1,0), vj:3.2, gap:0.19, give:1.0, drop:0.34, first:0.30, firstGap:0.24, tight:28, sink:6, shift:0.05, grip:0.3, learn:0.3, slopej:0, tipj:0, clear:0.12, reach:0.13, bag:1, open:0.25, openAt:0.06, hang:0.6,
+               // two in one hand, in circles: every ball is thrown from the inside, at x = ring[0], and comes down on the outside, at x = ring[1]
+               ring:[0.05, 0.26], vr:3.6, apart:0.18, across:0.24, ringz:[0.32, 0.40], lean1:new V3(0.07,0,0.08), swing:-1.1 };
+const BALLS = [0, 1].map(i => ({ i, p:new V3(), v:new V3(), w:new V3(), q:new Quat(), goal:new V3(), spot:new V3(), st:'pin', t:0, since:9, rest:0, lane:0, grab:false, vis:null, mesh:null }));
+// st: 'play' is a ball in the world; 'fade' is one that got away and is fading out; 'pin' is one held in the air at its spot, waiting to be handed in
+BALLS[0].mesh = orb; BALLS[0].vis = orbVis;
+{
+  const m = new THREE.Mesh(orb.geometry, ballMat('#ef7d3a')); m.castShadow = true; m.visible = false; scene.add(m);
+  m.add(new THREE.Mesh(orbHit.geometry, orbHit.material));
+  BALLS[1].mesh = m; BALLS[1].vis = sp(0, 9);
+}
+const TB = { n:1, ball:BALLS[0], imp:new V3(), carry:new V3(), ff:new V3(), state:'track', t:0, away:0, vT:3.1, bear:0, calm:0, has:false, auto:true, fresh:true,
+             caught:0, thrown:0, lost:0,
+             jug:'rest', now:0, held:null, other:null, flown:null, pp:new V3(), pv:new V3(), acc:new V3(), rel:new V3(), want:new V3(), tgtPrev:new V3(), tgtVel:new V3(), tgtOk:0, tRel:0, tDrop:-1, late:0, gain:1.08, leans:[new V3(), new V3()], side:0, meas:false, first:false, run:0, best:0, why:'', pat:'cols', ask:'cols', dx:0 };   // pat: the pattern being juggled; ask: the one asked for, taken up at the next catch
+const HOLD_AT = new V3(0.075,-0.046,0);                 // where a ball sits in the hand, in the hand's frame: the point of the hand that is steered
+const TP = { g:0.5, w:9, tense:0.3, push:0, slope:-0.08 };   // what a controller asks of the hand this frame: grip, how hard the arm tracks, tension, upward push, palm slope
+const PALM = { c:new V3(0.043,0,0), h:new V3(0.033,0.0015,0.030), r:0.012 };   // the palm as a rounded slab, in the hand's frame
+const CAPS = [];                                        // every capsule a ball can touch, where it was at the start of the frame and where it is now
+for (let f = 0; f < 5; f++) for (let k = 0; k < 3; k++) CAPS.push({ f, k, r:FINGERS[f].sr[k], grip:true, a0:new V3(), b0:new V3(), a1:new V3(), b1:new V3() });
+CAPS.push({ arm:true, r:0.027, grip:false, a0:new V3(), b0:new V3(), a1:new V3(), b1:new V3() });
+const TORSO = [new V3(-0.125,-0.45,0), new V3(-0.125,-0.03,0), 0.105];
+const bA = new V3(), bB = new V3(), bN = new V3(), bV = new V3(), bS = new V3(), bT = new V3(), bL = new V3(), bU = new V3(), ZERO = new V3(), tq = new Quat(), tq2 = new Quat(), tQ0 = new Quat(), tW0 = new V3();
+const live = b => b.i < TB.n && b.st !== 'pin';          // a ball the physics moves
+function tossReset() {
+  const C = TB; C.jug = 'rest'; C.state = 'track'; C.t = 0; C.fresh = true; C.bear = C.calm = C.away = 0; C.ball = BALLS[0]; C.carry.copy(TOSS.hold); C.tDrop = -1; C.run = 0;
+  for (const b of BALLS) { b.st = 'pin'; b.t = 0; b.grab = false; b.since = 9; b.rest = 0; b.v.set(0,0,0); b.w.set(0,0,0); b.vis.x = b.vis.v = 0; }
+  tossSpots(); for (const b of BALLS) b.p.copy(b.spot);
+}
+function tossSpots() {                                   // where each ball waits to be handed in: the one the hand is after above the palm, the other above where a juggled ball comes down
+  for (const b of BALLS) { if (b === TB.ball) b.spot.copy(TOSS.hold).y += 0.10; else b.spot.set(TB.pat === 'circle' ? TOSS.ring[1] : TOSS.lane[1], TOSS.ly + TOSS.drop, TB.pat === 'circle' ? TOSS.ringz[1] : TOSS.z); }
+}
+// When and where a ball in the air comes down to a height: the time from now, or -1 if it will not. The place is kept within the arm's reach.
+function landing(b, yc, out) {
+  const disc = b.v.y*b.v.y + 2*9.81*(b.p.y - yc);
+  if (disc <= 0 || (b.p.y < yc && b.v.y < 0)) return -1;
+  const t = b.grab ? 0 : (b.v.y + Math.sqrt(disc))/9.81;
+  out.set(clamp(b.p.x + b.v.x*t, -0.10, 0.40), yc, clamp(b.p.z + b.v.z*t, 0.22, 0.50));
+  return t;
+}
+const inHand = b => b.st === 'play' && !b.grab && b.since < 0.06 && b.p.distanceTo(palmPoint) < 0.11;
+// The hand cannot pick a ball up yet, so one that has got away fades out and is handed back: it waits in the air at its spot until it is let go.
+function ballLife(b, dt) {
+  b.t += dt;
+  if (b.st === 'play') {
+    const gone = !b.grab && b.since > 0.3 && (landing(b, TOSS.hold.y - 0.03, bT) < 0 || b.v.lengthSq() < 0.01);
+    b.rest = gone ? b.rest + dt : 0;
+    if (b.rest > 1.4 || b.p.y < FLOOR - 1) { b.st = 'fade'; b.t = 0; b.rest = 0; b.grab = false; TB.lost++; }
+  } else if (b.st === 'fade' && b.t > 0.45) { b.st = 'pin'; b.t = 0; }
+  if (b.st === 'pin') { b.p.copy(b.spot); b.v.set(0,0,0); b.w.set(0,0,0); b.since = 9; }
+}
+// A ball touches something: n points from the surface to the ball, depth is how far in it is, vc is how fast the surface is moving there.
+function ballTouch(b, n, depth, vc, mu, bounce, roll, h, part) {
+  const R = ORB_R;
+  b.p.addScaledVector(n, depth);
+  const vn = bS.copy(b.v).sub(vc).dot(n);
+  if (vn >= 0) return;
+  const jn = -(1 + (vn < -0.4 ? bounce : 0))*vn;
+  b.v.addScaledVector(n, jn); if (part) TB.imp.addScaledVector(n, jn);
+  // friction acts where the ball touches, and there its spin counts: it either grips and the ball rolls, or it slides
+  bS.crossVectors(b.w, n).multiplyScalar(-R).add(b.v).sub(vc); bS.addScaledVector(n, -bS.dot(n));
+  const slip = bS.length();
+  if (slip > 1e-6) {
+    // A juggling ball is a beanbag: on skin it does not roll, it grips or slides. Any other ball takes up part of the slip as spin.
+    const bag = part === 2 && TB.n === 2 && TOSS.bag;
+    bS.multiplyScalar(-Math.min(mu*jn, slip*(bag ? 1 : 2/7))/slip);
+    b.v.add(bS); if (part) TB.imp.add(bS);
+    if (!bag) b.w.addScaledVector(bT.crossVectors(n, bS), -1/(0.4*R));
+  }
+  b.w.multiplyScalar(Math.exp(-roll*h));                 // soft things, skin most of all, take the roll out of a ball
+  if (part === 2) b.since = 0;
+}
+function ballStep(b, s, h, dt) {                         // one small step of one ball: s is how far through the frame it is
+  const R = ORB_R;
+  if (b.grab) {                                          // the pointer has it: it is pulled along, and keeps that speed when let go
+    b.v.lerp(bA.subVectors(b.goal, b.p).multiplyScalar(28).clampLength(0, 5), 1 - Math.exp(-h*60)); b.w.multiplyScalar(Math.exp(-h*8));
+  } else b.v.y -= 9.81*h;
+  b.p.addScaledVector(b.v, h);
+  const wl = b.w.length(); if (wl > 1e-4) b.q.premultiply(tq.setFromAxisAngle(bA.copy(b.w).divideScalar(wl), wl*h));
+  for (const c of CAPS) {                                // fingers, thumb, forearm
+    bA.lerpVectors(c.a0, c.a1, s); bB.lerpVectors(c.b0, c.b1, s).sub(bA);
+    const u = clamp(bN.subVectors(b.p, bA).dot(bB)/Math.max(1e-9, bB.dot(bB)), 0, 1);
+    const d = bN.addScaledVector(bB, -u).length(), lim = R + c.r - TOSS.slack;
+    if (d >= lim || d < 1e-6) continue;
+    bV.lerpVectors(c.a1, c.b1, u).sub(bA.lerpVectors(c.a0, c.b0, u)).divideScalar(dt);
+    ballTouch(b, bN.divideScalar(d), lim - d, bV, 0.9, 0.1, TOSS.roll, h, c.grip ? 2 : 1);
+  }
+  {                                                      // palm
+    tq.copy(tQ0).slerp(Qh, s); bA.lerpVectors(tW0, W, s);
+    bB.copy(b.p).sub(bA).applyQuaternion(tq2.copy(tq).invert()).sub(PALM.c);
+    bN.set(clamp(bB.x, -PALM.h.x, PALM.h.x), clamp(bB.y, -PALM.h.y, PALM.h.y), clamp(bB.z, -PALM.h.z, PALM.h.z));
+    const d = bB.sub(bN).length(), lim = R + PALM.r;
+    if (d < lim && d > 1e-6) {
+      bB.divideScalar(d); bN.addScaledVector(bB, PALM.r).add(PALM.c);
+      bV.copy(bN).applyQuaternion(Qh).add(W).sub(bA.copy(bN).applyQuaternion(tQ0).add(tW0)).divideScalar(dt);
+      ballTouch(b, bB.applyQuaternion(tq), lim - d, bV, 0.9, 0.1, TOSS.roll, h, 2);
+    }
+  }
+  bN.set(clamp(b.p.x, -0.20, 0.54), clamp(b.p.y, TY-0.03, TY), clamp(b.p.z, 0.25, 0.69));   // desk
+  let d = bB.subVectors(b.p, bN).length(); if (d < R && d > 1e-6) ballTouch(b, bB.divideScalar(d), R - d, ZERO, 0.5, 0.55, 1.5, h, 0);
+  if (b.p.y < FLOOR + R) ballTouch(b, bB.set(0,1,0), FLOOR + R - b.p.y, ZERO, 0.5, 0.5, 1.5, h, 0);
+  bB.subVectors(TORSO[1], TORSO[0]); bN.subVectors(b.p, TORSO[0]); bN.addScaledVector(bB, -clamp(bN.dot(bB)/bB.dot(bB), 0, 1));   // the mannequin
+  d = bN.length(); if (d < R + TORSO[2] && d > 1e-6) ballTouch(b, bN.divideScalar(d), R + TORSO[2] - d, ZERO, 0.5, 0.4, 1.5, h, 0);
+}
+function tossStep(dt) {
+  const C = TB, R = ORB_R, b0 = BALLS[0], b1 = BALLS[1];
+  for (const c of CAPS) {
+    c.a0.copy(c.a1); c.b0.copy(c.b1);
+    if (c.arm) { c.a1.copy(E); c.b1.copy(W).addScaledVector(bA.subVectors(W, E).normalize(), -0.03); }
+    else { const p = HS[c.f].p; c.a1.copy(p[c.k]).applyQuaternion(Qh).add(W); c.b1.copy(p[c.k+1]).applyQuaternion(Qh).add(W); }
+    if (C.fresh) { c.a0.copy(c.a1); c.b0.copy(c.b1); }
+  }
+  if (C.fresh) { tQ0.copy(Qh); tW0.copy(W); C.fresh = false; }
+  C.imp.set(0,0,0);
+  for (const b of BALLS) if (live(b)) b.since += dt;
+  const n = Math.max(1, Math.ceil(dt/0.0025)), h = dt/n;
+  for (let i = 1; i <= n; i++) {
+    for (const b of BALLS) if (live(b)) ballStep(b, i/n, h, dt);
+    if (live(b0) && live(b1)) {                          // the two balls off each other
+      const d = bN.subVectors(b1.p, b0.p).length();
+      if (d < 2*R && d > 1e-6) {
+        bN.divideScalar(d); b0.p.addScaledVector(bN, (d - 2*R)/2); b1.p.addScaledVector(bN, (2*R - d)/2);
+        const vn = bS.subVectors(b1.v, b0.v).dot(bN);
+        if (vn < 0) { b0.v.addScaledVector(bN, 0.8*vn); b1.v.addScaledVector(bN, -0.8*vn); }
+      }
+    }
+  }
+  tQ0.copy(Qh); tW0.copy(W);
+  // What the arm feels. A ball's weight and every catch push the wrist down and bend the hand back; the arm's springs are
+  // the muscles that take it up. (Pressing a ball into the hand with the pointer pushes the arm too.)
+  const J = C.imp.clampLength(0, 1.5);
+  for (let c = 0; c < 3; c++) tgtS.s[c].v -= TOSS.heft*J.getComponent(c);
+  wflexS.v -= TOSS.wrist*J.dot(bA.set(0,1,0).applyQuaternion(Qh));
+}
+function tossPlan(t, v) {                               // how high the carrying hand is through a single throw: it sinks, drives up at a steady push, and stops short
+  const T = TOSS, a = v*v/(2*T.stroke), tb = v/a, tc = v/T.stop;
+  if (t < T.Tw) return -T.wind*smooth(0, T.Tw, t);
+  t -= T.Tw; if (t < tb) return -T.wind + 0.5*a*t*t;
+  t = Math.min(t - tb, tc); return -T.wind + T.stroke + v*t - 0.5*T.stop*t*t;
+}
+// One ball: hold it, throw it, go and be under it. With two balls this is also how the hand gets hold of the first one.
+function soloHand(dt, goal) {
+  const C = TB, T = TOSS, b = C.ball, has = inHand(b);
+  C.has = has; C.ff.set(0,0,0);
+  if (C.state === 'hold') {
+    // Carry it back to where it is held, gently: the fingers are still closing, and a ball in an open hand is easily left behind.
+    const left = tv.subVectors(T.hold, C.carry), far = left.length(), go = Math.min(far, 0.30*smooth(0.05, 0.35, C.t)*dt);
+    if (far > 1e-6) C.carry.addScaledVector(left, go/far);
+    C.away = has ? 0 : C.away + dt; C.calm = far < 1e-4 && has ? C.calm + dt : 0;
+    if (C.away > 0.25) { C.state = 'track'; C.t = 0; }
+    else if (C.n === 1 && C.auto && C.t > 0.9 && C.calm > 0.35) { C.state = 'throw'; C.t = 0; C.vT = T.v; }
+  }
+  goal.copy(C.carry);
+  if (C.state === 'throw') {
+    // The hand follows a planned rise exactly (the springs are told the plan's speed and push, not only its place). The ball
+    // leaves by itself when the hand slows down faster than gravity slows the ball, and the fingers let go as it does: any
+    // sooner and it rolls off them on the way up. The palm comes level for the push, so the ball goes straight up.
+    const v = C.vT, tb = 2*T.stroke/v, y0 = tossPlan(C.t, v), y1 = tossPlan(C.t+dt, v), ym = tossPlan(C.t-dt, v);
+    TP.w = 16; goal.y += y0; TP.push = Math.max(0, (y1 - 2*y0 + ym)/(dt*dt)); C.ff.y = (y1 - 2*y0 + ym)/(dt*dt) + 2*TP.w*(y1 - y0)/dt;
+    TP.g = 0.5*(1 - smooth(T.Tw + tb - 0.03, T.Tw + tb + 0.06, C.t)); TP.tense = 0.9; TP.slope = -0.08*(1 - smooth(0, T.Tw, C.t));
+    if (C.t > T.Tw + tb + v/T.stop + 0.04) { C.state = 'track'; C.t = 0; C.thrown++; }
+  } else if (C.state === 'track') {
+    // Out of the hand: work out where the ball will come down to catching height, and be there with the hand open.
+    TP.g = 0.12; TP.w = 13; C.calm = 0;
+    if (b.st === 'pin' && b.t > 0.55) b.st = 'play';                 // a ball being handed back is let go above the palm
+    if (b.st !== 'play' || landing(b, T.hold.y + 0.03, C.carry) < 0) C.carry.copy(T.hold);
+    goal.copy(C.carry);
+    if (has) { C.state = 'hold'; C.t = 0; C.away = 0; C.caught++; }
+  }
+}
+// Move a point and its velocity one step along the curve that reaches p1 moving at v1 a time T from now, and note the push that step took.
+function pathStep(p, v, p1, v1, T, dt, acc) {
+  if (T <= dt) { acc.subVectors(v1, v).divideScalar(dt); p.addScaledVector(v1, dt); v.copy(v1); return; }   // (it is there by now, unless something held it back; either way it does not jump)
+  const s = dt/T, s2 = s*s, s3 = s2*s;
+  for (let c = 0; c < 3; c++) {
+    const p0 = p.getComponent(c), v0 = v.getComponent(c), q1_ = p1.getComponent(c), w1 = v1.getComponent(c);
+    const nv = ((6*s2 - 6*s)*p0 + (3*s2 - 4*s + 1)*T*v0 + (6*s - 6*s2)*q1_ + (3*s2 - 2*s)*T*w1)/T;
+    p.setComponent(c, (2*s3 - 3*s2 + 1)*p0 + (s3 - 2*s2 + s)*T*v0 + (3*s2 - 2*s3)*q1_ + (s3 - s2)*T*w1);
+    acc.setComponent(c, (nv - v0)/dt); v.setComponent(c, nv);
+  }
+}
+/* Two in one hand. The hand only ever holds one ball: it throws that one from the inside, is empty for a moment, and is under
+   the other one as it comes down on the outside. Its path is planned from each event to the next: from a catch, down and round
+   and up to the place and speed of the throw, timed to leave just long enough to get to the next catch; and from a throw to
+   where the other ball will land, arriving already moving down with it. It measures each throw as the ball leaves, and
+   corrects the next one for what was missing. */
+const jugSpeed = () => TB.pat === 'circle' ? TOSS.vr : TOSS.vj;   // how fast a ball is thrown up: circles go higher, to leave time to carry the ball across
+function jugFlight() { const T = TOSS, v = jugSpeed(); return (v + Math.sqrt(v*v + 2*9.81*(T.ry - T.ly)))/9.81; }
+function jugAim(b) {
+  // Where the held ball will be let go. It goes up in the lane that is further from where the other ball is coming down, and
+  // from a place well clear of that ball's path, even if that means carrying it across: two balls that pass too close collide.
+  const C = TB, T = TOSS, o = BALLS[1 - b.i];
+  let ox = null;
+  if (o.st === 'play' && landing(o, T.ly, bT) >= 0) ox = bT.x; else if (o.st === 'pin') ox = o.spot.x;
+  if (C.pat === 'circle') {
+    // Circles: the ball is carried across to the inside and thrown from there, out and up, to come down where it was caught.
+    // The inside is never nearer than `apart` to where the other ball is coming down, so the one going up passes clear of it.
+    b.lane = o.lane = T.ring[1];
+    // (If the other ball is coming down inside of the hand, as it can be just after a change of pattern, this one goes straight up from outside it.)
+    const x = ox === null ? T.ring[0] : ox < Math.min(C.pp.x - 0.05, (T.ring[0] + T.ring[1])/2) ? Math.max(C.pp.x, ox + T.clear) : Math.min(T.ring[0], ox - T.apart);
+    // The circle is turned a little out of the plane the viewer sees it in, front to back, which adds to the room the balls have as they pass.
+    C.dx = clamp(x - C.pp.x, -T.across, T.across);
+    C.rel.set(C.pp.x + C.dx, T.ry, C.pp.z + clamp(T.ringz[0] - C.pp.z, -0.12, 0.12));
+    return;
+  }
+  // the lane on the hand's own side of that ball, so the held ball is never carried across under it
+  if (ox !== null) { const side = Math.abs(C.pp.x - ox) > 0.02 ? C.pp.x > ox : Math.abs(T.lane[1] - ox) > Math.abs(T.lane[0] - ox); b.lane = T.lane[side ? 1 : 0]; o.lane = T.lane[side ? 0 : 1]; }
+  let x = C.pp.x + clamp(b.lane - C.pp.x, -T.shift, T.shift);
+  if (ox !== null && Math.abs(x - ox) < T.clear) x = C.pp.x + clamp(ox + (b.lane === T.lane[1] ? 1 : -1)*T.clear - C.pp.x, -T.reach, T.reach);
+  C.dx = x - C.pp.x;
+  C.rel.set(x, T.ry, C.pp.z + clamp(T.z - C.pp.z, -T.shift, T.shift));
+}
+function jugStart() {
+  const C = TB, T = TOSS;
+  C.jug = 'carry'; C.held = C.ball; C.other = BALLS[1 - C.ball.i]; C.pp.copy(C.carry); C.pv.set(0,0,0); C.run = 0; C.meas = false;
+  C.first = true; C.pat = C.ask; jugAim(C.held);
+  C.tRel = C.now + T.first; C.tDrop = C.tRel + T.firstGap - Math.sqrt(2*T.drop/9.81);   // the second ball is let go so that it lands just after the first has left
+}
+const JUG_SAYS = { cols:'Two in one hand, in columns: each ball in a lane of its own.', circle:'Two in one hand, in circles: thrown from the inside, caught on the outside.' };
+const jugHint = () => JUG_SAYS[TB.ask] + ' Drag a ball away to break the pattern, and the hand starts again.';
+const jugSay = text => { if (mode === 'toss' && TB.n === 2) document.getElementById('hint').textContent = text; };
+function jugFail(why) {                                  // the pattern is lost: go back to getting hold of one ball
+  const C = TB, a = C.held || C.flown, o = C.other; C.why = why; jugSay(C.run > 1 ? `Dropped after ${C.run} catches. Starting again.` : jugHint());
+  C.jug = 'rest'; C.t = 0; C.away = 0; C.calm = 0; C.carry.copy(C.pp); C.tDrop = -1; C.run = 0;
+  const ta = a.st === 'play' ? landing(a, TOSS.hold.y + 0.03, bT) : -1, to = o.st === 'play' ? landing(o, TOSS.hold.y + 0.03, bT) : -1;
+  if (inHand(a)) { C.ball = a; C.state = 'hold'; } else if (inHand(o)) { C.ball = o; C.state = 'hold'; } else { C.ball = to > ta ? o : a; C.state = 'track'; }
+}
+function jugRest() {                                     // between runs: one ball is got into the hand and held, the other waits above where it will be dropped in
+  const C = TB, a = C.ball, o = BALLS[1 - a.i];
+  if (!inHand(a) && (inHand(o) || (a.st !== 'play' && o.st === 'play'))) { C.ball = o; C.state = inHand(o) ? 'hold' : 'track'; C.t = 0; C.away = 0; if (a.st === 'pin') a.vis.x = 0; }
+  C.pat = C.ask; tossSpots();
+  if (C.state === 'hold' && C.calm > 0.35 && C.ball.st === 'play') { const w = BALLS[1 - C.ball.i]; if (w.st === 'pin' && w.t > 0.6 && w.vis.x > 0.9) jugStart(); }
+}
+function jugHand(dt, goal) {
+  const C = TB, T = TOSS, F = jugFlight();
+  if (C.tDrop >= 0 && C.now >= C.tDrop) { if (C.other.st === 'pin') C.other.st = 'play'; C.tDrop = -1; }
+  TP.w = T.tight; TP.tense = 0.8; TP.slope = T.slopej;
+  let moved = false;
+  if (C.jug === 'empty') {
+    const th = C.flown, nx = C.other;
+    if (C.meas && th.since > 0.04) {                    // the ball has left: see how fast it really went, and lean the next throw toward what was asked for
+      const vy = th.v.y + 9.81*th.since;
+      if (vy > 1) C.gain = clamp(C.gain*Math.pow(clamp(jugSpeed()/vy, 0.85, 1.18), 0.6), 0.8, 1.8);
+      const ln = C.leans[C.side], ex = C.want.x - th.v.x, ez = C.want.z - th.v.z;
+      if (Math.hypot(ex, ez) < 0.25) { ln.x = clamp(ln.x + T.learn*ex, -0.4, 0.4); ln.z = clamp(ln.z + T.learn*ez, -0.4, 0.4); }   // a throw that went wild was knocked, and teaches nothing   // each lane has its own correction: the arm is in a different pose there
+      C.meas = false;
+    }
+    if (nx.st === 'play' && nx.since < 0.05 && nx.p.distanceTo(palmPoint) < 0.09) {   // caught: plan the throw so the hand is free in time for the one that is up
+      C.caught++; C.best = Math.max(C.best, ++C.run); jugSay(`${JUG_SAYS[C.pat]} ${C.run} ${C.run === 1 ? 'catch' : 'catches'} in a row.`);
+      C.held = nx; C.other = th; C.jug = 'carry'; C.pat = C.ask; jugAim(nx);
+      const back = th.st === 'play' ? landing(th, T.ly, bL) : -1;
+      if (back < 0) jugFail('the other ball is gone'); else C.tRel = C.now + clamp(back - T.gap, 0.22, 0.6);
+    } else {
+      let tl = -1;
+      if (nx.st === 'play') tl = landing(nx, T.ly, bL);
+      else if (nx.st === 'pin' && C.tDrop >= 0) { tl = C.tDrop - C.now + Math.sqrt(2*T.drop/9.81); bL.copy(nx.spot).y = T.ly; }
+      C.has = false; TP.g = 0.2; TP.push = 0; moved = true;
+      if (tl >= 0) pathStep(C.pp, C.pv, bL, bV.set(0, -T.give, 0), tl, dt, C.acc);
+      else if ((C.late += dt) > 0.12) jugFail('nothing to catch'); else { C.pp.addScaledVector(C.pv, dt); C.acc.set(0,0,0); }
+    }
+  }
+  if (C.jug === 'carry' && !moved) {
+    const left = C.tRel - C.now, px = C.pp.x, py = C.pp.y, pz = C.pp.z, vx = C.pv.x, vy = C.pv.y, vz = C.pv.z;
+    C.want.set((C.held.lane - C.rel.x)/F, 0, ((C.pat === 'circle' ? T.ringz[1] : T.z) - C.rel.z)/F);   // the sideways speed that brings it down where it should
+    C.side = C.held.lane === T.lane[0] ? 0 : 1; bL.copy(C.want).add(C.first ? (C.pat === 'circle' ? T.lean1 : ZERO) : C.leans[C.side]); bL.y = C.gain*jugSpeed();   // (the first throw is a different movement, with a fixed correction of its own)
+    if (!C.first) bL.z += T.swing*C.dx;                  // carrying the ball across swings the forearm, and that swing is still in the hand as it throws: allow for it
+    pathStep(C.pp, C.pv, C.rel, bL, left, dt, C.acc);
+    // The hand may not drop away from the ball: after a catch it coasts down with it and then drives up, so the ball keeps its weight on the palm
+    // and does not slide about. (Only the first throw, from a standstill, is allowed a dip.) The rest of the path makes up for what this takes out.
+    const sink = C.first ? T.sink : 0;
+    if (C.acc.y < -sink) { C.acc.y = -sink; C.pv.y = vy - sink*dt; C.pp.y = py + C.pv.y*dt; }
+    // Nor may it be pulled sideways harder than the ball's grip on the palm allows, which is its weight plus the push under it.
+    const side = Math.hypot(C.acc.x, C.acc.z), most = T.hang*(9.81 + C.acc.y);
+    if (side > most && left > dt) { const k = most/side; C.acc.x *= k; C.acc.z *= k; C.pv.x = vx + C.acc.x*dt; C.pv.z = vz + C.acc.z*dt; C.pp.x = px + C.pv.x*dt; C.pp.z = pz + C.pv.z*dt; }
+    C.has = true; TP.push = Math.max(0, C.acc.y);
+    TP.g = T.grip - (T.grip - T.open)*smooth(T.openAt, T.openAt - 0.06, left);   // the fingers are out of the way before the ball leaves: a finger still closing as it goes flicks it
+    if (left <= dt) { C.jug = 'empty'; C.flown = C.held; C.held = null; C.meas = !C.first; C.late = 0; C.first = false; C.thrown++; }
+    else if (C.held.since > 0.12 && left > 0.05) jugFail('came out of the hand');
+  }
+  if (C.jug === 'rest') return;
+  C.pp.y = Math.max(C.pp.y, -0.215);                     // not into the desk
+  goal.copy(C.pp); C.ff.copy(C.acc);
+}
+function tossHand(dt) {
+  const C = TB, T = TOSS, goal = tv2; C.t += dt; C.now += dt;
+  for (const b of BALLS) if (b.i < C.n) ballLife(b, dt);
+  TP.g = 0.5; TP.w = 9; TP.tense = 0.3; TP.push = 0; TP.slope = -0.08;
+  if (C.n === 2 && C.jug === 'rest') jugRest();
+  if (C.n === 2 && C.jug !== 'rest') jugHand(dt, goal);
+  if (C.n === 1 || C.jug === 'rest') soloHand(dt, goal);
+  C.bear += ((C.has ? 1 : 0) - C.bear)*(1 - Math.exp(-dt*(C.has ? (C.jug === 'rest' ? 5 : 25) : 14)));   // the arm takes up a weight it has felt for a moment; a ball that has just landed still makes it dip
+  const jug = C.n === 2 && C.jug !== 'rest';
+  P.tgt.copy(goal).sub(tv.copy(HOLD_AT).applyQuaternion(Qh)); P.tgtW = TP.w;
+  // Juggling, the arm is told how its target is really moving, which includes the hand turning about the wrist as the arm swings:
+  // its speed and its push are read off the target itself, frame to frame.
+  if (jug && C.tgtOk > 0) {
+    tv.subVectors(P.tgt, C.tgtPrev).divideScalar(dt).clampLength(0, 8);
+    if (C.tgtOk > 1) C.ff.subVectors(tv, C.tgtVel).divideScalar(dt).clampLength(0, 160);
+    C.ff.addScaledVector(tv, 2*TP.w); C.tgtVel.copy(tv);
+  }
+  C.tgtPrev.copy(P.tgt); C.tgtOk = jug ? C.tgtOk + 1 : 0;
+  for (let c = 0; c < 3; c++) tgtS.s[c].v += C.ff.getComponent(c)*dt;
+  tgtS.s[1].v += T.heft*C.bear*(9.81 + TP.push)*dt;
+  P.pole.copy(C.n === 2 ? T.polej : T.pole);
+  P.palm.set(0,1,0).addScaledVector(tv.set(0,0,1).applyQuaternion(Qh).setY(0), C.n === 2 ? T.tipj : 0.08);   // palm up, tipped a touch toward the thumb pad (juggling, it is dead level: a tilt kicks every catch sideways)
+  gripPose(TP.g); P.wflex = 0; P.level = TP.slope; P.wdev = 0; P.tense = TP.tense; P.firm = 0.85;   // and toward the roots of the fingers, so the ball settles there
+}
+function tossBalls(n) {                                  // one ball or two
+  const C = TB; if (n === C.n) return;
+  if (n === 1 && C.ball.i === 1) {                       // the ball that stays is the one the hand has
+    const a = BALLS[0], b = BALLS[1]; a.p.copy(b.p); a.v.copy(b.v); a.w.copy(b.w); a.q.copy(b.q); a.st = b.st; a.t = b.t; a.since = b.since; a.rest = b.rest; a.vis.x = b.vis.x; b.vis.x = 0;
+  }
+  C.n = n; C.jug = 'rest'; C.ball = BALLS[0]; C.tDrop = -1; if (C.state === 'throw') C.state = 'track';
+  if (n === 2) { const b = BALLS[1]; b.st = 'pin'; b.t = 0; b.grab = false; b.vis.x = b.vis.v = 0; }
+  const cam = n === 2 ? JUG_CAM : TOSS_CAM; flyTo(cam[0], cam[1], true);
+}
+function tossPattern(pat) {                              // juggle two, in columns or in circles; the hand changes over without stopping
+  const C = TB; tossBalls(2);
+  C.ask = pat; if (C.jug === 'rest') C.pat = pat;
+}
+function tossBar() {
+  const C = TB;
+  subBar([['Toss one', () => { tossBalls(1); C.auto = true; tossBar(); }, C.n === 1 && C.auto], ['Just hold', () => { tossBalls(1); C.auto = false; tossBar(); }, C.n === 1 && !C.auto],
+    ['Columns', () => { tossPattern('cols'); tossBar(); }, C.n === 2 && C.ask === 'cols'], ['Circles', () => { tossPattern('circle'); tossBar(); }, C.n === 2 && C.ask === 'circle']]);
+  if (mode === 'toss') document.getElementById('hint').textContent = C.n === 2 ? jugHint() : MODES.toss.hint;
+}
 function update(dt) {
   time += dt;
-  orbS.get(orbPos);
-  P.roll = 0;
+  if (mode === 'toss') orbPos.copy(BALLS[0].p); else orbS.get(orbPos);
+  P.roll = 0; P.firm = 0; P.level = null;
   MODES[mode].fn(time, dt);
 
   // overlapping action: the hand and fingers drag behind the wrist's velocity (vf, in the forearm frame)
-  const dragF = clamp(vf.y*0.55, -0.45, 0.45), dragD = clamp(vf.z*0.55, -0.4, 0.4);
+  const loose = 1 - P.firm, dragF = clamp(vf.y*0.55, -0.45, 0.45)*loose, dragD = clamp(vf.z*0.55, -0.4, 0.4)*loose;   // a hand that is carrying something holds its wrist firm
   const penMode = isPen(mode);
   if (!penMode) penK = 0;
   P.tgt.y += pushUp*(1 - penK);
@@ -1481,14 +1826,15 @@ function update(dt) {
       const c = P.curl, want = f === 0 ? c[0][j] : f === 1 ? 0.88*c[1][j]+0.12*c[2][j] : f === 2 ? 0.10*c[1][j]+0.75*c[2][j]+0.15*c[3][j]
                          : f === 3 ? 0.20*c[2][j]+0.60*c[3][j]+0.20*c[4][j] : 0.25*c[3][j]+0.75*c[4][j];
       const lim = (f === 0 ? [[-0.6,1.2],[-0.1,1.4],[-0.1,1.4]] : [[-0.3,1.6],[0,1.9],[0,1.45]])[j];   // how far each joint can really go
-      curlS[f][j].t = clamp(want + clamp(vf.y*0.5, -0.15, 0.4)*(0.5+0.35*j), lim[0], lim[1]);
+      curlS[f][j].t = clamp(want + clamp(vf.y*0.5, -0.15, 0.4)*(0.5+0.35*j)*loose, lim[0], lim[1]);
     }
     spreadS[f].t = P.spread[f];
   }
-  tenseS.t = P.tense; rollS.t = P.roll; orbVis.t = mode === 'reach' || mode === 'pick' ? 1 : 0;
+  tenseS.t = P.tense; rollS.t = P.roll; levelS.t = P.level === null ? 0 : 1; if (P.level !== null) levelSlope += (P.level - levelSlope)*(1 - Math.exp(-dt*12)); orbVis.t = mode === 'toss' ? (BALLS[0].st === 'fade' ? 0 : 1) : mode === 'reach' || mode === 'pick' ? 1 : 0;
+  BALLS[1].vis.t = mode === 'toss' && TB.n === 2 && BALLS[1].st !== 'fade' ? 1 : 0;
   penVis.t = penMode ? 1 : 0; goalVis.t = mode === 'flick' ? 1 : 0; ballVis.t = 1; pupVis.t = mode === 'puppet' ? 1 : 0;
   if (PEN.sheetT > 0) { paperVis.t = 0; if ((PEN.sheetT -= dt) <= 0) blankSheet(!PEN.script); } else paperVis.t = penMode ? 1 : 0;   // a used sheet slides away and a clean one comes back
-  const n = Math.max(1, Math.ceil(dt/0.006)); for (let i = 0; i < n; i++) stepSprings(dt/n);
+  const n = Math.max(1, Math.ceil(dt/(mode === 'toss' ? 0.003 : 0.006))); for (let i = 0; i < n; i++) stepSprings(dt/n);   // the tossing arm is pushed hard, so its springs are stepped finer
 
   // ── analytic two-bone IK with a pole vector
   function solveArm() {
@@ -1512,7 +1858,7 @@ function update(dt) {
   // ── forearm twist: roll about the forearm until the palm faces the wanted direction, within anatomical limits
   palmS.get(D).normalize().applyQuaternion(q1.copy(Qf).invert());
   if (Math.hypot(D.y, D.z) > 0.2) twS.t = clamp(Math.atan2(-D.z, -D.y), -1.4, 1.5);
-  const tw = twS.x;
+  const tw = levelS.x > 1e-3 && TB.n === 2 ? lerp(twS.x, twS.t, levelS.x) : twS.x;   // juggling, a hand kept level rolls with the forearm as it is this frame too
   Qt.copy(Qf).multiply(q1.setFromAxisAngle(AX, tw));
 
   upper.quaternion.copy(Qu);
@@ -1522,7 +1868,8 @@ function update(dt) {
   half.scale.z = Math.min(1.45, 1 + 0.5*(1/Math.cos(flex/2) - 1));
   fore.quaternion.setFromAxisAngle(AY, -flex);
   q1.setFromAxisAngle(AX, tw/3); tw1.quaternion.copy(q1); tw2.quaternion.copy(q1); tw3.quaternion.copy(q1);
-  hand.quaternion.setFromEuler(eul.set(0, wdevS.x, wflexS.x, 'YZX'));
+  wristLevel = levelS.x > 1e-3 ? levelS.x*levelWrist(levelSlope, 1.0) : 0;   // worked out from the forearm as it is this frame, so the hand does not lag behind a fast arm
+  hand.quaternion.setFromEuler(eul.set(0, wdevS.x, wflexS.x + wristLevel, 'YZX'));
   Qh.copy(Qt).multiply(hand.quaternion);
   palmPoint.set(0.075,-0.046,0).applyQuaternion(Qh).add(W);
   }
@@ -1535,9 +1882,15 @@ function update(dt) {
     solveArm();
   }
 
+  // The tossed ball moves first, against the fingers as they were, carried to where the hand is now. So a hand that moves
+  // takes the ball with it, and the fingers below only give way to what the ball could not get out of the way of.
+  if (mode === 'toss') { tossStep(dt); orbPos.copy(BALLS[0].p); orb.quaternion.copy(BALLS[0].q); }
+
   // ── fingers: resolve contacts in hand space, then pose the bones (thumb last: it yields to the fingers)
   thumbRoll = rollS.x;
-  orbOn = orbVis.x > 0.5; if (orbOn) orbH.copy(orbPos).sub(W).applyQuaternion(q1.copy(Qh).invert());
+  orbN = 0; q1.copy(Qh).invert();
+  if (mode === 'toss') { for (const b of BALLS) if (b.i < TB.n && b.vis.x > 0.5) orbHs[orbN++].copy(b.p).sub(W).applyQuaternion(q1); }
+  else if (orbVis.x > 0.5) orbHs[orbN++].copy(orbPos).sub(W).applyQuaternion(q1);
   penOn = penVis.x > 0.5;
   const overTable = W.z > 0.2 || penMode, ka = 1 - Math.exp(-dt*40);
   needLift = 0;
@@ -1565,6 +1918,7 @@ function update(dt) {
 
   orb.position.copy(orbPos); orb.scale.setScalar(Math.max(0.001, orbVis.x)); orb.visible = orbVis.x > 0.02;
   orb.material.emissiveIntensity = 0.55 + 1.1*grip;
+  { const b = BALLS[1], m = b.mesh; m.visible = b.vis.x > 0.02; if (m.visible) { m.position.copy(b.p); m.quaternion.copy(b.q); m.scale.setScalar(Math.max(0.001, b.vis.x)); } }
   spiroShow(dt);
   noteVis.t = mode === 'draw' && NOTE.on ? 1 : 0; if (NOTE.flash > 0 && (NOTE.flash -= dt) <= 0) noteRender();
   const nv = clamp(noteVis.x, 0, 1); notePaper.visible = nv > 0.01; notePaper.material.opacity = nv; notePaper.position.x = NOTE.cx - (1-nv)*0.05;
@@ -1595,8 +1949,10 @@ function setMode(m) {
   else if (!cam && camHome) { flyTo(camHome[0], camHome[1]); camHome = null; }
   camFor = cam; document.body.classList.toggle('lit', cam === PEN_CAM);
   PEN.ptr.down = false; RPS.phase = 'wait';
-  if (m === 'rps') subBar(RPS.names.map((nm, i) => [nm, () => rpsPlay(i)])); else if (m === 'puppet') { PUP.t = 0; PUP.auto = true; pupBar(); } else if (m === 'draw') drawBar(); else subBar();
+  if (m === 'rps') subBar(RPS.names.map((nm, i) => [nm, () => rpsPlay(i)])); else if (m === 'puppet') { PUP.t = 0; PUP.auto = true; pupBar(); } else if (m === 'draw') drawBar(); else if (m === 'toss') tossBar(); else subBar();
   if (m === 'flick') { fbReset(); FB.auto = true; FB.aim = 0; }
+  if (m === 'toss') { tossReset(); if (TB.n === 2) flyTo(JUG_CAM[0], JUG_CAM[1], true); }
+  orb.material = m === 'toss' ? tossMat : orbMat; dragging = false; orb.quaternion.identity();
   if (m === 'write' && !PEN.greeted) { PEN.greeted = true; type('Hi!\n'); }
   el.style.cursor = '';
 }
@@ -1651,7 +2007,7 @@ function setView(v) {
   for (const g of boneViz) g.visible = v === 'xray' || v === 'bones';
   for (const nl of nails) nl.visible = v === 'skin';
 }
-const FEATURED = ['write', 'draw', 'flick', 'rps', 'puppet'];   // the bar shows these; the original motions are still in MODES for the showcase recorder
+const FEATURED = ['write', 'draw', 'flick', 'rps', 'puppet', 'toss'];   // the bar shows these; the original motions are still in MODES for the showcase recorder
 for (const k of FEATURED) { const m = MODES[k], b = document.createElement('button'); b.textContent = m.label; b.dataset.k = k; b.onclick = () => setMode(k); $('modes').append(b); }
 for (const [k, l] of Object.entries(VIEWS)) { const b = document.createElement('button'); b.textContent = l; b.dataset.k = k; b.onclick = () => setView(k); $('views').append(b); }
 addEventListener('keydown', e => {
@@ -1685,7 +2041,9 @@ const setRay = e => { ndc.set(e.clientX/innerWidth*2-1, -(e.clientY/innerHeight)
 const pagePlane = new THREE.Plane(AY.clone(), -PAPER.y);
 const pagePoint = e => { setRay(e); return ray.ray.intersectPlane(pagePlane, tv) ? [PX0 - tv.x, tv.z - PZ0] : null; };
 const onPage = (q, m = 0) => q && q[0] > -m && q[0] < PAPER.w + m && q[1] > -m && q[1] < PAPER.h + m;
-let inking = false, winding = false, noteTap = false;
+let inking = false, winding = false, noteTap = false, dragBall = BALLS[0];
+// the ball in play under the pointer, nearest first
+const ballUnder = () => { let best = null, bd = 1e9; for (const b of BALLS) { if (b.i >= TB.n || b.st !== 'play') continue; const h = ray.intersectObject(b.mesh.children[0]); if (h.length && h[0].distance < bd) { bd = h[0].distance; best = b; } } return best; };
 const onNoteC = q => onNote(q) && q[0] > NOTE.u0 + NOTE.w - 0.015 && q[1] > NOTE.v0 + NOTE.h - 0.015;
 const onNote = q => q && q[0] > NOTE.u0 && q[0] < NOTE.u0 + NOTE.w && q[1] > NOTE.v0 && q[1] < NOTE.v0 + NOTE.h;
 const onDesk = pt => pt.x > -0.20 && pt.x < 0.54 && pt.z > 0.25 && pt.z < 0.69;
@@ -1713,11 +2071,13 @@ el.addEventListener('pointerdown', e => {
     }
     return;
   }
-  if (mode !== 'reach') return;
+  if (mode !== 'reach' && mode !== 'toss') return;
   setRay(e);
-  if (ray.intersectObject(orbHit).length) {
+  const got = mode === 'toss' ? ballUnder() : ray.intersectObject(orbHit).length ? BALLS[0] : null;
+  if (got) {
+    if (mode === 'toss') { dragBall = got; got.grab = true; got.goal.copy(got.p); }
     dragging = true; controls.enabled = false; el.setPointerCapture(e.pointerId); el.style.cursor = 'grabbing';
-    plane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(tv).negate(), orb.position);
+    plane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(tv).negate(), got.mesh.position);
   }
 }, true);
 el.addEventListener('pointermove', e => {
@@ -1730,11 +2090,11 @@ el.addEventListener('pointermove', e => {
     return;
   }
   setRay(e);
-  if (dragging) { if (ray.ray.intersectPlane(plane, tv)) { if (tv.length() > 0.8) tv.setLength(0.8); tv.y = Math.max(tv.y, (tv.z > 0.26 ? TY : FLOOR) + 0.034); orbGoal.copy(tv); } }
-  else el.style.cursor = mode === 'reach' && ray.intersectObject(orbHit).length ? 'grab' : '';
+  if (dragging) { if (ray.ray.intersectPlane(plane, tv)) { if (tv.length() > 0.8) tv.setLength(0.8); tv.y = Math.max(tv.y, (tv.z > 0.26 ? TY : FLOOR) + 0.034); (mode === 'toss' ? dragBall.goal : orbGoal).copy(tv); } }
+  else el.style.cursor = (mode === 'toss' ? ballUnder() : mode === 'reach' && ray.intersectObject(orbHit).length) ? 'grab' : '';
 });
 const endDrag = () => {
-  if (dragging) { dragging = false; controls.enabled = true; hold = 6; el.style.cursor = ''; }
+  if (dragging) { dragging = false; for (const b of BALLS) b.grab = false; controls.enabled = true; hold = 6; el.style.cursor = ''; }
   if (inking) { inking = false; controls.enabled = true; PEN.ptr.down = false; }
   if (winding) { winding = false; controls.enabled = true; fbRelease(); }
   if (noteTap) { noteTap = false; controls.enabled = true; }
@@ -1750,11 +2110,22 @@ addEventListener('resize', () => { camera.aspect = innerWidth/innerHeight; camer
 setMode('write'); setView('skin');
 document.getElementById('loading')?.remove();
 const clock = new THREE.Clock(); let hudT = 0;
-let directing = false;
+let directing = false, pace = 1/60, step = 1/120, owed = 0, odd = 0;   // the usual time between frames, the size of a simulation step, the time not yet simulated, and how many frames in a row have been unusual
 function frame() {
   if (directing) { requestAnimationFrame(frame); return; }
   const dt = Math.min(clock.getDelta(), 0.05);
-  if (!paused) update(dt);
+  if (!paused) {
+    if (mode !== 'toss') update(dt);
+    else {
+      // A throw is over in a tenth of a second and its speed is set in the last few steps, so the tossing hand is worked out in
+      // steps of one fixed size, no more than 9 ms, however unevenly the frames arrive: a long frame is more steps, not longer ones.
+      if (Math.abs(dt - pace) < 0.3*pace) { pace += (dt - pace)*0.05; odd = 0; } else if (++odd > 20) { pace = dt; odd = 0; }
+      const fit = pace/Math.ceil(pace/0.009); if (Math.abs(fit - step) > 0.12*step) step = fit;   // the step only changes when the frame rate really has
+      const n = Math.min(8, Math.round((owed += dt)/step));
+      for (let i = 0; i < n; i++) update(step);
+      owed = n < 8 ? owed - n*step : 0;
+    }
+  }
   if (camFly) {
     const c = camFly, e = smooth(0, 1, c.k = Math.min(1, c.k + dt/1.3));
     camera.position.lerpVectors(c.p0, c.p1, e); controls.target.lerpVectors(c.t0, c.t1, e);
@@ -1766,7 +2137,7 @@ function frame() {
     hudT = 0;
     $('h-elbow').textContent = (flex*DEG).toFixed(0)+'°';
     $('h-twist').textContent = (twS.x*DEG).toFixed(0)+'°';
-    $('h-wflex').textContent = (wflexS.x*DEG).toFixed(0)+'°';
+    $('h-wflex').textContent = ((wflexS.x + wristLevel)*DEG).toFixed(0)+'°';
     $('h-wdev').textContent = (wdevS.x*DEG).toFixed(0)+'°';
   }
   requestAnimationFrame(frame);
@@ -1852,7 +2223,7 @@ async function direct({ fps = 60, PW = 1080, PH = 810, every = 1, post = '/frame
   setView('skin'); directing = false; paused = false;
   return { frames: sent, seconds: n/fps };
 }
-window.rig = { type, spirograph, SPIRO, NOTE, noteOpen, noteType, notePrompt, noteCanvas:noteCv, rpsPlay, RPS, FB, PUP, pupPick, playStrokes, parseStrokes, ASK, CAT, pen:{ canvas:inkCv, GRIP, PEN, FONT, seatPen, freshSheet, get k() { return penK; }, tip: () => tv.copy(GRIP.tip).applyQuaternion(Qh).add(W).toArray(), target: () => penT.toArray() }, direct, envReady, dbg:{ get pushUp() { return pushUp; }, setRoll: v => thumbRoll = v, chain, hits, HS, FINGERS, resolveFinger, P, curlS, spreadS }, setMode, setView, bones, arm, camera, controls, setTime: t => time = t, step: (s) => { for (let i = 0; i < s*60; i++) update(1/60); }, pause: v => paused = v };
+window.rig = { TB, TOSS, BALLS, tossBalls, tossPattern, toss:{ CAPS, get palm() { return palmPoint.toArray(); }, get W() { return W.toArray(); }, get Qh() { return Qh.toArray(); }, get tgt() { return tgtS.get(new V3()).toArray(); }, get tw() { return [twS.x, twS.t, wflexS.x, wristLevel, flex]; }, get E() { return E.toArray(); } }, type, spirograph, SPIRO, NOTE, noteOpen, noteType, notePrompt, noteCanvas:noteCv, rpsPlay, RPS, FB, PUP, pupPick, playStrokes, parseStrokes, ASK, CAT, pen:{ canvas:inkCv, GRIP, PEN, FONT, seatPen, freshSheet, get k() { return penK; }, tip: () => tv.copy(GRIP.tip).applyQuaternion(Qh).add(W).toArray(), target: () => penT.toArray() }, direct, envReady, dbg:{ get pushUp() { return pushUp; }, setRoll: v => thumbRoll = v, chain, hits, HS, FINGERS, resolveFinger, P, curlS, spreadS }, setMode, setView, bones, arm, camera, controls, setTime: t => time = t, tick: dt => update(dt), step: (s) => { for (let i = 0; i < s*60; i++) update(1/60); }, pause: v => paused = v };
 </script>
 </body>
 </html>
