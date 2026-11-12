@@ -59,6 +59,8 @@ For this fork, open `index.html` in a browser. It loads three.js and the lightin
 
 **Two arms.** There is one arm's worth of code and state. The right arm is the same code run a second time each frame, in a world mirrored left to right about the middle of the torso: its state is put in place, the frame is worked out as if for a left arm, and the state is put aside again. Its bones are a copy of the left arm's, drawn under a mirror, and the balls are mirrored while it deals with them. So the right arm is exactly the left arm's mirror image, and everything tuned for one holds for the other. Outside Toss it hangs at rest.
 
+**The form.** The arms hang from a dress form: shoulders as wide as arms this long need, a chest, a waist, hips, and a neck that stops at a cap. It is a stack of rounded-rectangle rings, each as wide and as deep as a table says at that height. Below the armpits it is narrow enough for the arms to hang beside it. For a ball it is three capsules: trunk, shoulders and neck.
+
 **Passing.** Passing is a three-ball cascade with one, two or all three of its balls, which is also how a person learns it. The hands take turns on a steady beat. Each catches on its outside, carries the ball in toward the middle, and throws it up and across to come down on the other hand's outside three beats later, by which time that hand has thrown what it held. With fewer than three balls the same beats go by empty. Each hand runs the one-hand planner in its own mirrored world. The place a hand throws from is far enough inside the place it catches that the ball going up and the one coming down move apart from the moment of the throw. With three balls the third is let go in the air above the left hand's catching place, timed to land when a thrown one would.
 
 **Scripted pictures.** A picture is plain text, one pen stroke per line: `x,y x,y x,y ...` in millimetres on the 210 x 148 page, origin at the bottom-left. A smooth curve is fitted through the points, `!` after a point makes a sharp corner, and a stroke that ends on its first point is closed. Lines that are not strokes are ignored, so a whole chat reply can be pasted in. The strokes go through the same planner as handwriting.
@@ -91,7 +93,8 @@ The shot list, camera moves and ball path are in the `direct()` function in `ind
 
 ## Known limits
 
-- Only the fingers collide. The forearm and palm can pass through the table or the torso, and an arm hanging at the side overlaps the torso's outline.
+- Only the fingers collide. The forearm and palm can pass through the table or the form.
+- The form has no head, and it is not one skin with the arms: each arm's rounded end sits in the end of the shoulder.
 - Neighbouring fingers do not collide with each other.
 - There is a faint seam at the wrist where the arm skin meets the hand skin.
 - The wood and the skin are generated in code and are stylised, not photographic.

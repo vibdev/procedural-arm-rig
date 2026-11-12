@@ -398,11 +398,30 @@ for (const F of FINGERS) {
 
 // mannequin torso + stand
 const matte = new THREE.MeshStandardMaterial({ color:0x2a2e37, roughness:0.85 });
-const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.12, 0.42, 12, 32), matte);
-torso.position.set(-0.125,-0.24,0); torso.scale.z = 0.8; torso.castShadow = torso.receiveShadow = true; scene.add(torso);
+/* A dress form: shoulders as wide as the arms need, a chest, a waist, hips, and a neck that stops at a cap. It is a stack of
+   rounded-rectangle rings, each as wide and as deep as a table says at that height. The arms hang from the ends of the shoulders,
+   and below the armpits the form is narrow enough for them to hang beside it. */
+const SHOULDERS = 0.38, MID = -SHOULDERS/2;             // the left shoulder is at x = 0, the right one this far to its left; MID is the middle of the body
+const FORM = [  // height, half width, half depth
+  [-0.615,0.070,0.058],[-0.600,0.104,0.084],[-0.570,0.119,0.096],[-0.500,0.123,0.099],[-0.380,0.104,0.086],[-0.240,0.122,0.097],[-0.120,0.136,0.099],
+  [-0.070,0.156,0.092],[-0.025,0.184,0.079],[0.015,0.176,0.070],[0.045,0.124,0.062],[0.070,0.066,0.055],[0.095,0.049,0.048],[0.140,0.046,0.046],[0.150,0.036,0.036]];
+const torso = (() => {
+  const W = FORM.map(r => [r[0], r[1]]), Dp = FORM.map(r => [r[0], r[2]]), y0 = FORM[0][0], y1 = FORM[FORM.length-1][0], rings = 64, around = 56, pos = [], idx = [];
+  for (let i = 0; i <= rings; i++) {
+    const t = i/rings, y = y0 + (y1 - y0)*(t*t*(3 - 2*t)*0.35 + t*0.65), hx = key(W, y), hz = key(Dp, y), e = 2/2.5;   // rings a little closer together at the ends, where the shape turns fastest
+    for (let j = 0; j < around; j++) { const a = j/around*2*PI, c = Math.cos(a), sn = Math.sin(a); pos.push(MID + hx*Math.sign(c)*Math.abs(c)**e, y, hz*Math.sign(sn)*Math.abs(sn)**e); }
+  }
+  for (let i = 0; i < rings; i++) for (let j = 0; j < around; j++) { const a = i*around + j, b = i*around + (j+1)%around; idx.push(a, a+around, b, b, a+around, b+around); }
+  const bot = pos.length/3; pos.push(MID, y0, 0); const top = bot + 1; pos.push(MID, y1, 0);   // closed below, and capped above
+  for (let j = 0; j < around; j++) { const b = (j+1)%around; idx.push(bot, j, b, top, rings*around + b, rings*around + j); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx); g.computeVertexNormals();
+  const m = new THREE.Mesh(g, matte); m.castShadow = m.receiveShadow = true; scene.add(m);
+  const knob = new THREE.Mesh(new THREE.SphereGeometry(0.017, 20, 14), new THREE.MeshStandardMaterial({ color:0x8d8674, roughness:0.35, metalness:0.9 })); knob.position.set(MID, y1 + 0.013, 0); knob.castShadow = true; scene.add(knob);
+  return m;
+})();
 const FLOOR = -0.82;
-const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.012,0.012,0.3,16), matte); pole.position.set(-0.125,-0.67,0); pole.castShadow = true; scene.add(pole);
-const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.16,0.17,0.016,48), matte); foot.position.set(-0.125,FLOOR+0.008,0); foot.receiveShadow = foot.castShadow = true; scene.add(foot);
+const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.012,0.012,0.3,16), matte); pole.position.set(MID,-0.67,0); pole.castShadow = true; scene.add(pole);
+const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.16,0.17,0.016,48), matte); foot.position.set(MID,FLOOR+0.008,0); foot.receiveShadow = foot.castShadow = true; scene.add(foot);
 const TY = -0.31;   // table top height
 const desk = new THREE.Group(); scene.add(desk);         // the desk can be slid aside (a juggler does not stand at one)
 const DESK_AWAY = -1.15;                               // how far back it goes, behind the mannequin
@@ -1080,7 +1099,7 @@ function pointHand(v, dev = 0.4, flex = 0.7) {
   v.applyQuaternion(q1.copy(Qt).invert());
   P.wdev = clamp(Math.atan2(-v.z, v.x), -dev, dev); P.wflex = clamp(Math.asin(clamp(v.y, -1, 1)), -flex, flex);
 }
-const TOSS_CAM = [new V3(0.93,0.02,1.45), new V3(0.05,-0.12,0.30)], JUG_CAM = [new V3(1.15,0.15,1.96), new V3(0.05,-0.04,0.30)], PASS_CAM = [new V3(0.33,0.07,1.78), new V3(-0.125,-0.05,0.25)];   // far enough back that the top of a circle and the hand, above the buttons, are both in view
+const TOSS_CAM = [new V3(0.93,0.02,1.45), new V3(0.05,-0.12,0.30)], JUG_CAM = [new V3(1.15,0.15,1.96), new V3(0.05,-0.04,0.30)], PASS_CAM = [new V3(0.30,0.03,1.86), new V3(-0.19,-0.10,0.25)];   // far enough back that the top of a circle and the hand, above the buttons, are both in view
 const PEN_CAM = [new V3(0.105,0.134,0.281), new V3(0.105,-0.31,0.40)], PUP_CAM = [new V3(1.90,0.12,1.00), new V3(-0.62,0.02,0.50)];
 
 /* ───────────────────────── shadow puppets ─────────────────────────
@@ -1490,7 +1509,7 @@ const TOSS = { hold:new V3(0.05,-0.22,0.30), pole:new V3(-0.1,-1,-0.5),   // the
                // two in one hand, in circles: every ball is thrown from the inside, at x = ring[0], and comes down on the outside, at x = ring[1]
                ring:[-0.06, 0.12], vr:3.6, apart:0.17, across:0.24, supine:1.65, ringz:[0.27, 0.35], lean1:new V3(0.07,0,0.08), swing:-0.55,
                // two hands: the beat, how long a ball is held, where a hand throws from and catches (its own x in, x out), and how far along with a ball it moves to meet it
-               beat:0.28, pd:0.32, pdmin:0.2, px:[-0.08, 0.12], pfirst:0.32, follow:0.5 };
+               beat:0.30, pd:0.34, pdmin:0.22, px:[-0.10, 0.13], pfirst:0.32, follow:0.5 };
 const BALLS = [0, 1, 2].map(i => ({ i, dest:-1, hand:0, p:new V3(), v:new V3(), w:new V3(), q:new Quat(), goal:new V3(), spot:new V3(), st:'pin', t:0, since:9, rest:0, lane:0, grab:false, vis:null, mesh:null }));
 // st: 'play' is a ball in the world; 'fade' is one that got away and is fading out; 'pin' is one held in the air at its spot, waiting to be handed in
 BALLS[0].mesh = orb; BALLS[0].vis = orbVis;
@@ -1513,7 +1532,7 @@ function mkCaps() {                                     // every capsule of one 
   c.push({ arm:true, r:0.027, grip:false, a0:new V3(), b0:new V3(), a1:new V3(), b1:new V3() });
   return c;
 }
-const TORSO = [new V3(-0.125,-0.45,0), new V3(-0.125,-0.03,0), 0.105];
+const TORSO = [[new V3(MID,-0.50,0), new V3(MID,-0.10,0), 0.108], [new V3(MID - 0.10,-0.02,0), new V3(MID + 0.10,-0.02,0), 0.078], [new V3(MID,0.04,0), new V3(MID,0.12,0), 0.05]];   // the form, for a ball: trunk, shoulders, neck
 const bA = new V3(), bB = new V3(), bN = new V3(), bV = new V3(), bS = new V3(), bT = new V3(), bL = new V3(), bU = new V3(), ZERO = new V3(), tq = new Quat(), tq2 = new Quat();
 let curImp = null;                                      // where the pushes of the arm now being touched are added up
 const live = b => b.i < TB.n && b.st !== 'pin';          // a ball the physics moves
@@ -1600,8 +1619,10 @@ function ballStep(b, s, h, dt) {                         // one small step of on
   bN.set(clamp(b.p.x, -0.20, 0.54), clamp(b.p.y, TY-0.03, TY), clamp(b.p.z, desk.position.z + 0.25, desk.position.z + 0.69));   // desk, wherever it is
   let d = bB.subVectors(b.p, bN).length(); if (d < R && d > 1e-6) ballTouch(b, bB.divideScalar(d), R - d, ZERO, 0.5, 0.55, 1.5, h, 0);
   if (b.p.y < FLOOR + R) ballTouch(b, bB.set(0,1,0), FLOOR + R - b.p.y, ZERO, 0.5, 0.5, 1.5, h, 0);
-  bB.subVectors(TORSO[1], TORSO[0]); bN.subVectors(b.p, TORSO[0]); bN.addScaledVector(bB, -clamp(bN.dot(bB)/bB.dot(bB), 0, 1));   // the mannequin
-  d = bN.length(); if (d < R + TORSO[2] && d > 1e-6) ballTouch(b, bN.divideScalar(d), R + TORSO[2] - d, ZERO, 0.5, 0.4, 1.5, h, 0);
+  for (const [ta, tb, tr] of TORSO) {                    // the mannequin
+    bB.subVectors(tb, ta); bN.subVectors(b.p, ta); bN.addScaledVector(bB, -clamp(bN.dot(bB)/bB.dot(bB), 0, 1));
+    d = bN.length(); if (d < R + tr && d > 1e-6) ballTouch(b, bN.divideScalar(d), R + tr - d, ZERO, 0.5, 0.4, 1.5, h, 0);
+  }
 }
 function armColliders(A) {                               // note where this arm's capsules and palm are now, and where they were; called with this arm's state in place
   for (const c of A.caps) {
@@ -1963,7 +1984,7 @@ function tossBar() {
    left to right about the middle of the torso: its state is put in place, the frame is worked out as if for a left arm, and
    the state is put aside again. Its bones are a copy of the left arm's, drawn under a mirror. Anything in the real world
    that it deals with (the balls) is mirrored while it is being worked out. */
-const MIRROR = -0.25;                                   // x goes to MIRROR - x: a mirror standing at x = -0.125
+const MIRROR = -SHOULDERS;                              // x goes to MIRROR - x: a mirror standing in the middle of the body
 const armR = (() => {
   const rootR = root.clone(true), bonesR = bones.map(b => rootR.getObjectByName(b.name)), viz = [], nl = [];
   rootR.traverse(o => { if (o.userData.viz) viz.push(o); if (o.userData.nail) nl.push(o); });
